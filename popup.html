@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { width: 400px; font: 13px/1.5 "Microsoft YaHei", system-ui, sans-serif; padding: 10px; margin: 0; }
+    h1 { font-size: 14px; margin: 0 0 6px; }
+    #url { color: #555; word-break: break-all; margin-bottom: 6px; }
+    #status { color: #888; min-height: 16px; margin-bottom: 8px; }
+    label { display: block; margin: 7px 0 3px; color: #444; }
+    select, input { width: 100%; padding: 6px; border: 1px solid #ccc; border-radius: 5px; }
+    button { width: 100%; padding: 8px; border: 0; background: #1d6fb8; color: #fff; border-radius: 6px; cursor: pointer; margin-top: 10px; }
+    button:disabled { background: #ccc; cursor: not-allowed; }
+  </style>
+</head>
+<body>
+  <h1>Zhoubian Collect · 识别并归档</h1>
+  <div id="url">读取当前标签页中…</div>
+  <div id="status">请先打开小红书或微博宣传页。</div>
+
+  <label for="platformSel">来源平台</label>
+  <select id="platformSel">
+    <option value="auto">自动识别</option>
+    <option value="xiaohongshu">小红书</option>
+    <option value="weibo">微博</option>
+  </select>
+
+  <label for="mode">处理方式</label>
+  <select id="mode">
+    <option value="ai">AI 自动识别并归档</option>
+    <option value="local">无 AI 本地导出</option>
+  </select>
+
+  <div id="aiOptions">
+    <label for="target">归档软件</label>
+    <select id="target">
+      <option value="obsidian">Obsidian</option>
+      <option value="wps">WPS</option>
+      <option value="evernote">印象笔记</option>
+      <option value="other">其他软件 / 文件夹</option>
+    </select>
+  </div>
+
+  <label id="archiveDirLabel" for="archiveDir">归档位置</label>
+  <input id="archiveDir" placeholder="例如 C:\Users\me\Documents\周边归档">
+
+  <button id="go" disabled>识别并归档</button>
+  <script src="popup.js"></script>
+</body>
+</html>

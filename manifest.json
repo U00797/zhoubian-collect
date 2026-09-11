@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "Zhoubian Collect 周边采集",
+  "version": "0.3.0",
+  "description": "读取当前微博/小红书页面，可交给 AI 识别归档，也可无 AI 生成本地结果包。",
+  "permissions": ["activeTab", "scripting", "tabs"],
+  "host_permissions": [
+    "https://www.xiaohongshu.com/*",
+    "https://weibo.com/*",
+    "https://*.weibo.com/*",
+    "https://m.weibo.cn/*",
+    "https://weibo.cn/*",
+    "https://*.weibo.cn/*",
+    "http://127.0.0.1/*",
+    "http://localhost/*"
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src http://127.0.0.1 http://localhost;"
+  },
+  "action": {
+    "default_title": "归档当前页",
+    "default_popup": "popup.html"
+  }
+}

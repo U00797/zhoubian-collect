@@ -1,0 +1,7 @@
+{
+  "host": "127.0.0.1",
+  "port": 8768,
+  "codex_cli": "",
+  "codex_thread": "",
+  "output_dir": "output"
+}
