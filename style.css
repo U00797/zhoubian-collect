@@ -141,7 +141,9 @@ button:disabled {
 }
 
 .primary-button {
+  width: 180px;
   height: 46px;
+  justify-self: center;
   border: 1px solid var(--accent);
   background: var(--accent);
   color: var(--accent-text);
