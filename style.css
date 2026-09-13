@@ -206,6 +206,7 @@ h2 {
 }
 
 .table-wrap {
+  max-height: min(72vh, 760px);
   overflow: auto;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -215,9 +216,9 @@ h2 {
 
 table {
   width: 100%;
-  min-width: 1160px;
+  min-width: 980px;
   border-collapse: collapse;
-  table-layout: fixed;
+  table-layout: auto;
 }
 
 th,
@@ -225,8 +226,9 @@ td {
   border-right: 1px solid var(--border);
   border-bottom: 1px solid var(--border);
   padding: 12px;
-  text-align: left;
-  vertical-align: top;
+  text-align: center;
+  vertical-align: middle;
+  white-space: normal;
   overflow-wrap: anywhere;
 }
 
@@ -242,20 +244,26 @@ tbody tr:last-child td {
 th {
   position: sticky;
   top: 0;
-  z-index: 1;
+  z-index: 2;
   background: var(--surface-strong);
   font-size: 13px;
+  white-space: nowrap;
+  box-shadow: 0 1px 0 var(--border);
 }
 
-th:nth-child(1) { width: 105px; }
-th:nth-child(2) { width: 150px; }
-th:nth-child(3) { width: 105px; }
-th:nth-child(4) { width: 105px; }
-th:nth-child(5) { width: 165px; }
-th:nth-child(6) { width: 210px; }
-th:nth-child(7) { width: 120px; }
-th:nth-child(8) { width: 120px; }
-th:nth-child(9) { width: 150px; }
+.cell-publisher { min-width: 90px; }
+.cell-release_date { min-width: 160px; max-width: 220px; }
+.cell-series { min-width: 90px; }
+.cell-ip { min-width: 90px; }
+.cell-items { min-width: 130px; }
+.cell-spec {
+  min-width: 240px;
+  max-width: 330px;
+  white-space: pre-line;
+}
+.cell-price { min-width: 105px; }
+.cell-images { min-width: 70px; }
+.cell-notes { min-width: 180px; max-width: 280px; }
 
 .empty-value {
   color: var(--muted);
@@ -265,6 +273,7 @@ th:nth-child(9) { width: 150px; }
 .image-list {
   display: flex;
   flex-wrap: wrap;
+  justify-content: center;
   gap: 8px;
 }
 

@@ -26,13 +26,26 @@ function setStatus(message, type = "") {
   status.className = "status" + (type ? ` ${type}` : "");
 }
 
+function formatSpec(value) {
+  return String(value ?? "")
+    .split(/[；;]+/)
+    .map((part) => {
+      let text = part.trim().replace(/\s+/g, " ");
+      text = text.replace(/^(【[^】]+】)\s*/, "$1\n");
+      text = text.replace(/\s*(尺寸|材质|工艺)\s*[:：]?\s*/g, "\n$1 ");
+      return text.trim();
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
 function emptyCell(cell, value) {
   const text = String(value ?? "").trim();
   if (text) {
     cell.textContent = text;
   } else {
     cell.textContent = "\\";
-    cell.className = "empty-value";
+    cell.classList.add("empty-value");
   }
 }
 
@@ -59,16 +72,57 @@ function imageCell(cell, images) {
   cell.append(list);
 }
 
+function rowCellValue(row, key) {
+  if (key === "images") {
+    return JSON.stringify(row.images || []);
+  }
+  if (key === "spec") {
+    return formatSpec(row[key]);
+  }
+  return String(row[key] ?? "").trim();
+}
+
+function buildRowSpans() {
+  return columns.map(([key]) => {
+    const spans = Array(rows.length).fill(1);
+    let start = 0;
+    while (start < rows.length) {
+      let end = start + 1;
+      const value = rowCellValue(rows[start], key);
+      while (end < rows.length && rowCellValue(rows[end], key) === value) {
+        end += 1;
+      }
+      if (end - start > 1) {
+        spans[start] = end - start;
+        for (let index = start + 1; index < end; index += 1) {
+          spans[index] = 0;
+        }
+      }
+      start = end;
+    }
+    return spans;
+  });
+}
+
 function renderRows() {
   resultsBody.replaceChildren();
-  for (const row of rows) {
+  const rowSpans = buildRowSpans();
+  for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+    const row = rows[rowIndex];
     const tr = document.createElement("tr");
-    for (const [key] of columns) {
+    for (let columnIndex = 0; columnIndex < columns.length; columnIndex += 1) {
+      const [key] = columns[columnIndex];
+      const span = rowSpans[columnIndex][rowIndex];
+      if (!span) {
+        continue;
+      }
       const td = document.createElement("td");
+      td.rowSpan = span;
+      td.classList.add(`cell-${key}`);
       if (key === "images") {
         imageCell(td, row.images);
       } else {
-        emptyCell(td, row[key]);
+        emptyCell(td, key === "spec" ? formatSpec(row[key]) : row[key]);
       }
       tr.append(td);
     }
@@ -96,6 +150,8 @@ function exportCsv() {
         value = (row.images || [])
           .map((path) => new URL(path, location.origin).href)
           .join("; ") || "\\";
+      } else if (key === "spec") {
+        value = formatSpec(row[key]) || "\\";
       } else {
         value = row[key] || "\\";
       }
