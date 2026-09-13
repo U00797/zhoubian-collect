@@ -68,6 +68,10 @@ PRICE_RE = re.compile(
     r"(?:\s*[/／]\s*(个|对|套|组|枚|张|盒|款|份))?",
     re.IGNORECASE,
 )
+UNIT_SALE_RE = re.compile(
+    r"^\s*(\d+\s*(?:只|个|件|枚|对|套|组|盒|包|款|份)"
+    r"\s*[/／]\s*套[，,、；;]?\s*按套售卖)\s*[；;]?\s*"
+)
 WEIBO_BASE62 = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 IMAGE_BAD_RE = re.compile(r"data:|\.(?:svg|gif)(?:\?|$)", re.I)
 IMAGE_AVATAR_RE = re.compile(r"avatar|profile_pic|orj360|thumb150|/(?:30|50)/", re.I)
@@ -703,6 +707,17 @@ def crop_image_region(source_path, box, output_path):
     return True
 
 
+def move_unit_sale_to_price(row):
+    notes = row.get("notes", "").strip()
+    match = UNIT_SALE_RE.match(notes)
+    if not match:
+        return
+    unit_sale = match.group(1)
+    price = row.get("price", "").strip()
+    row["price"] = f"{price}，{unit_sale}" if price else unit_sale
+    row["notes"] = notes[match.end():].strip()
+
+
 def vision_rows(cfg, payload, image_paths):
     cli = resolve_codex_cli(cfg)
     if not cli:
@@ -730,10 +745,11 @@ def vision_rows(cfg, payload, image_paths):
 5. series 读取“系列/主题”名称，去掉方括号、书名号和结尾的“系列”字样，例如“【Golden Hour】系列”应输出“Golden Hour”。
 6. release_date 综合正文和图片，按“发售日期丨地点丨具体展位”整理。
 7. spec 紧凑合并每项商品的尺寸、材质和工艺，格式如“【徽章】尺寸约80x80mm 材质马口铁、PET 工艺细沙镭射底、烫哑金”。
-8. price 按原图写法，例如“42CNY/组”，看不清则用“\\”。
-9. image_regions 是该行商品在原图中的裁剪区域数组。image_index 是从 1 开始的附图编号；box 使用 [左, 上, 右, 下] 归一化坐标，范围 0-1000。
-10. 每条明细只裁出该编号/套组对应的完整区域，包括编号、标题、规格、价格和商品图，不要包含相邻套组，也不要返回整张图片。
-11. 所有无法确认的字段使用“\\”，不要编造。
+8. price 只记录售价、计价单位和销售数量或方式，例如“42CNY/组”“69CNY/只，2只/套，按套售卖”，不要把满赠、尺寸等信息写入 price。
+9. notes 只记录满赠特典及条件等补充信息；同一批商品的共同备注必须完全相同，不要把价格或销售数量写入 notes。
+10. image_regions 是该行商品在原图中的裁剪区域数组。image_index 是从 1 开始的附图编号；box 使用 [左, 上, 右, 下] 归一化坐标，范围 0-1000。
+11. 每条明细只裁出该编号/套组对应的完整区域，包括编号、标题、规格、价格和商品图，不要包含相邻套组，也不要返回整张图片。
+12. 所有无法确认的字段使用“\\”，不要编造。
 
 只输出以下结构的 JSON，不要 Markdown，不要解释：
 {{"rows":[{{"publisher":"","release_date":"","series":"","ip":"","items":"","spec":"","price":"","image_regions":[{{"image_index":1,"box":[0,300,1000,700]}}],"notes":""}}]}}
@@ -799,6 +815,7 @@ def vision_rows(cfg, payload, image_paths):
                 "price", "notes",
             )
         }
+        move_unit_sale_to_price(row)
         row["images"] = []
         regions = item.get("image_regions")
         if not isinstance(regions, list):
@@ -1224,6 +1241,13 @@ def self_test():
         assert rows[0]["price"] == "39元/个"
         assert "尺寸：10cm" in rows[0]["spec"]
         assert "满赠" in rows[0]["notes"]
+        price_row = {
+            "price": "69CNY/只",
+            "notes": "2只/套，按套售卖；满赠特典纸袋：赠品不可叠加。",
+        }
+        move_unit_sale_to_price(price_row)
+        assert price_row["price"] == "69CNY/只，2只/套，按套售卖"
+        assert price_row["notes"] == "满赠特典纸袋：赠品不可叠加。"
         json_path, csv_path, md_path = write_result_bundle(
             Path(tmp), payload, rows)
         assert json.loads(json_path.read_text(encoding="utf-8"))["rows"]

@@ -223,8 +223,7 @@ table {
 
 th,
 td {
-  border-right: 1px solid var(--border);
-  border-bottom: 1px solid var(--border);
+  border: 1px solid var(--border);
   padding: 12px;
   text-align: center;
   vertical-align: middle;
