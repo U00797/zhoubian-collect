@@ -75,6 +75,7 @@ UNIT_SALE_RE = re.compile(
 )
 IMAGE_BAD_RE = re.compile(r"data:|\.(?:svg|gif)(?:\?|$)", re.I)
 IMAGE_AVATAR_RE = re.compile(r"avatar|profile_pic|orj360|thumb150|/(?:30|50)/", re.I)
+VISION_SLICE_HEIGHT = 3000
 
 
 def merge_defaults(cfg):
@@ -872,6 +873,139 @@ def move_unit_sale_to_price(row):
     row["notes"] = notes[match.end():].strip()
 
 
+def prepare_vision_images(image_paths, job_dir):
+    parts = []
+    try:
+        from PIL import Image, ImageOps
+    except ImportError:
+        return [
+            {
+                "path": Path(path),
+                "source_path": Path(path),
+                "source_height": 0,
+                "slice_top": 0,
+                "slice_height": 0,
+            }
+            for path in image_paths
+        ]
+
+    images = []
+    for source_index, raw_path in enumerate(image_paths, 1):
+        path = Path(raw_path)
+        try:
+            with Image.open(path) as source:
+                image = ImageOps.exif_transpose(source)
+                width, height = image.size
+                images.append({
+                    "source_index": source_index,
+                    "path": path,
+                    "width": width,
+                    "height": height,
+                    "image": image.convert("RGB"),
+                })
+        except (OSError, ValueError):
+            continue
+
+    long_images = [
+        item for item in images if item["height"] > VISION_SLICE_HEIGHT
+    ]
+    # ponytail: only drop thumbnail-like extras when several full catalog
+    # images are present; a single long image may coexist with unique photos.
+    long_indexes = {item["source_index"] for item in long_images}
+    if len(long_images) >= 2 and all(
+        item["height"] <= 1200 and item["width"] <= 1200
+        for item in images if item["source_index"] not in long_indexes
+    ):
+        selected_images = long_images
+    else:
+        selected_images = images
+
+    slices_dir = job_dir / "images" / "vision_slices"
+    for item in selected_images:
+        if item["height"] <= VISION_SLICE_HEIGHT:
+            parts.append({
+                "path": item["path"],
+                "source_path": item["path"],
+                "source_height": item["height"],
+                "slice_top": 0,
+                "slice_height": item["height"],
+            })
+            continue
+
+        slices_dir.mkdir(parents=True, exist_ok=True)
+        for slice_number, top in enumerate(
+            range(0, item["height"], VISION_SLICE_HEIGHT), 1
+        ):
+            bottom = min(item["height"], top + VISION_SLICE_HEIGHT)
+            slice_path = slices_dir / (
+                f"{item['source_index']:02d}_{slice_number:02d}"
+                f"_{top}-{bottom}.jpg"
+            )
+            item["image"].crop((0, top, item["width"], bottom)).save(
+                slice_path, quality=95, optimize=True
+            )
+            parts.append({
+                "path": slice_path,
+                "source_path": item["path"],
+                "source_height": item["height"],
+                "slice_top": top,
+                "slice_height": bottom - top,
+            })
+    return parts
+
+
+def region_on_original(part, box):
+    try:
+        values = [float(value) for value in box]
+    except (TypeError, ValueError):
+        return None
+    if len(values) != 4 or not part.get("source_height"):
+        return None
+    if max(values) > 1000:
+        left, top, right, bottom = values
+    elif max(values) <= 1:
+        left, top, right, bottom = (value * 1000 for value in values)
+    else:
+        left, top, right, bottom = values
+
+    slice_top = part["slice_top"]
+    slice_height = part["slice_height"]
+    source_height = part["source_height"]
+    original_top = slice_top + top / 1000 * slice_height
+    original_bottom = slice_top + bottom / 1000 * slice_height
+    return [
+        left,
+        original_top / source_height * 1000,
+        right,
+        original_bottom / source_height * 1000,
+    ]
+
+
+def normalize_series_from_spec(rows, row_sources):
+    series_counts = {}
+    for row, sources in zip(rows, row_sources):
+        series = row.get("series", "").strip()
+        if not series or series == "\\":
+            continue
+        for source in sources:
+            counts = series_counts.setdefault(source, {})
+            counts[series] = counts.get(series, 0) + 1
+
+    for row, sources in zip(rows, row_sources):
+        series = row.get("series", "").strip()
+        if series not in ("", "\\") and series != row.get("ip", "").strip():
+            continue
+        label_text = " ".join(re.findall(r"【([^】]+)】", row.get("spec", "")))
+        votes = {}
+        for source in sources:
+            counts = series_counts.get(source, {})
+            for candidate, count in counts.items():
+                if candidate and candidate in label_text:
+                    votes[candidate] = votes.get(candidate, 0) + count
+        if votes:
+            row["series"] = max(votes, key=votes.get)
+
+
 def vision_rows(cfg, payload, image_paths):
     cli = resolve_codex_cli(cfg)
     if not cli:
@@ -883,6 +1017,9 @@ def vision_rows(cfg, payload, image_paths):
     response_path = job_dir / "vision-response.txt"
     response_path.unlink(missing_ok=True)
     keywords = "、".join(payload.get("keywords") or []) or "无"
+    vision_parts = prepare_vision_images(image_paths, job_dir)
+    if not vision_parts:
+        raise RuntimeError("没有可用于图片识别的商品图")
     prompt = f"""你是周边商品明细提取器。直接目测图片并立即输出 JSON；不要执行命令、调用工具或分析像素。只依据下面的帖文和附图，不要访问网页，不要猜测，也不要补全看不清的内容。
 
 帖文标题：{payload.get('title') or ''}
@@ -891,17 +1028,17 @@ def vision_rows(cfg, payload, image_paths):
 帖文正文：
 {str(payload.get('text') or '')[:12000]}
 
-请逐张检查全部附图，并遵守：
-1. 一张图片可能并列展示多个商品套组；每个编号、标题或独立套组各输出一行。
-2. 不同图片即使排版相似，也必须分别识别，不能因为结构相同就合并或略过。
+请逐张检查全部附图。为保留长图中的小字，部分长图已按从上到下的顺序切成多个片段；每个片段都是独立附图，并按下文 image_index 对应。请遵守：
+1. 一张图片可能并列展示多个商品套组；每个编号、标题或独立套组各输出一行。前后商品块排版相似也不能合并或略过，必须逐块核对。
+2. 不同图片片段即使内容结构相似，也必须分别识别，不能因为结构相同而合并或略过。
 3. 满赠纸袋或特典不单独增加贩售商品行，将其名称、尺寸、满赠条件和“不可叠加”等信息写入每条相关记录的 notes；不要依据商品图中的局部款式说明生成 notes。
 4. publisher 读取“出品/出品方”，不要把“原著、授权、承制”或社交账号当作出品方；同时出现“授权”和“出品”时必须取“出品”后的主体。
-5. series 读取“系列/主题”名称，去掉方括号、书名号和结尾的“系列”字样，例如“【Golden Hour】系列”应输出“Golden Hour”。
+5. series 从商品块上方或附近最近的“系列/主题”标题读取，去掉方括号、书名号和结尾的“系列”字样，例如“【Golden Hour】系列”应输出“Golden Hour”；同一商品图或切片主系列下的所有商品通常使用同一个 series，不要因 spec 内同时出现多个系列名而改写 series。不要附加 1、2、3 等编号，只有确实没有系列信息时才写“\\”。
 6. release_date 综合正文和图片，按“发售日期丨地点丨具体展位”整理。
-7. spec 紧凑合并每项商品的尺寸、材质和工艺，格式如“【徽章】尺寸约80x80mm 材质马口铁、PET 工艺细沙镭射底、烫哑金”。
+7. spec 必须优先读取商品图下方和旁边的小字。只要尺寸、材质、工艺中任意一项存在，就必须把已读取到的项全部写入；只对确实缺失的子项写“\\”，严禁因为没有同时找到三项而整项留空。多个制品用“；”分隔，格式如“【徽章】尺寸约80x80mm 材质马口铁、PET 工艺细沙镭射底、烫哑金”。
 8. price 只记录售价、计价单位和销售数量或方式，例如“42CNY/组”“69CNY/只，2只/套，按套售卖”，不要把满赠、尺寸等信息写入 price。
-9. notes 只记录适用于整批商品的满赠、特典及条件；同一批商品的共同备注必须完全相同，不要把价格、销售数量、款式名称、单个商品特典或尺寸写入 notes。
-10. image_regions 是该行商品图在原图中的紧边界数组。image_index 是从 1 开始的附图编号；box 使用 [左, 上, 右, 下] 归一化坐标，范围 0-1000。
+9. notes 汇总正文和图片中的所有 72H 特典及各级满赠，完整记录赠送对象、所属系列、数量、尺寸、门槛和限制；72H 是活动时限，绝不能误写成“满72CNY”等价格。同一批商品的共同备注必须完全相同，不要把单个商品的售价或销售数量写入 notes。
+10. image_regions 是该行商品图在当前附图中的紧边界数组。image_index 是从 1 开始的附图编号；box 使用 [左, 上, 右, 下] 归一化坐标，范围 0-1000。
 11. 只框商品照片、套组图或商品效果图，严格排除编号、标题、规格、价格、分隔线、背景、无关文字和相邻商品；不要按固定高度切块，也不要返回整行或整张图片。默认每行只用多个商品图的合并紧边界；只有商品图相隔很远或属于明显不同套组时才返回多个框。
 12. 所有无法确认的字段使用“\\”，不要编造。
 
@@ -917,7 +1054,7 @@ def vision_rows(cfg, payload, image_paths):
         "-c", "mcp_servers.node_repl.enabled=false",
         "-o", str(response_path), "-i",
     ]
-    cmd.extend(str(path) for path in image_paths)
+    cmd.extend(str(part["path"]) for part in vision_parts)
     cmd.extend(["--", prompt])
     try:
         proc = subprocess.run(
@@ -957,6 +1094,7 @@ def vision_rows(cfg, payload, image_paths):
         "备注": "notes",
     }
     rows = []
+    row_sources = []
     crops_dir = job_dir / "images" / "crops"
     crop_bottoms = {}
     for row_number, item in enumerate(items, 1):
@@ -976,6 +1114,7 @@ def vision_rows(cfg, payload, image_paths):
         if not isinstance(regions, list):
             regions = []
         row_bottoms = {}
+        sources = set()
         for region_number, region in enumerate(regions, 1):
             if not isinstance(region, dict):
                 continue
@@ -983,28 +1122,36 @@ def vision_rows(cfg, payload, image_paths):
                 index = int(region.get("image_index"))
             except (TypeError, ValueError):
                 continue
-            if not 1 <= index <= len(image_paths):
+            if not 1 <= index <= len(vision_parts):
                 continue
-            source_path = Path(image_paths[index - 1])
+            part = vision_parts[index - 1]
+            source_path = part["source_path"]
+            sources.add(str(source_path))
+            original_box = region_on_original(part, region.get("box"))
+            if not original_box:
+                continue
             crop_path = crops_dir / (
                 f"{row_number:02d}_{region_number:02d}_{source_path.stem}.jpg"
             )
             bounds = crop_image_region(
-                source_path, region.get("box"), crop_path,
-                crop_bottoms.get(index, 0),
+                source_path, original_box, crop_path,
+                crop_bottoms.get(str(source_path), 0),
             )
             if bounds:
                 row["images"].append(str(crop_path))
-                row_bottoms[index] = max(
-                    row_bottoms.get(index, 0), bounds[3]
+                source_key = str(source_path)
+                row_bottoms[source_key] = max(
+                    row_bottoms.get(source_key, 0), bounds[3]
                 )
         crop_bottoms.update({
-            index: max(crop_bottoms.get(index, 0), bottom)
-            for index, bottom in row_bottoms.items()
+            source_key: max(crop_bottoms.get(source_key, 0), bottom)
+            for source_key, bottom in row_bottoms.items()
         })
 
         row["source_text"] = str(payload.get("text") or "")
         rows.append(row)
+        row_sources.append(sources)
+    normalize_series_from_spec(rows, row_sources)
     return rows
 
 
@@ -1406,6 +1553,21 @@ def self_test():
         move_unit_sale_to_price(price_row)
         assert price_row["price"] == "69CNY/只，2只/套，按套售卖"
         assert price_row["notes"] == "满赠特典纸袋：赠品不可叠加。"
+        mixed_series = [
+            {
+                "series": "测试作品",
+                "ip": "测试作品",
+                "spec": "【序曲海报】400x600mm；【浪漫世纪海报】400x700mm",
+            },
+            {
+                "series": "序曲",
+                "ip": "测试作品",
+                "spec": "尺寸80x80mm",
+            },
+        ]
+        normalize_series_from_spec(mixed_series, [{"11.jpg"}, {"11.jpg"}])
+        assert mixed_series[0]["series"] == "序曲"
+        assert mixed_series[1]["series"] == "序曲"
         json_path, csv_path, md_path = write_result_bundle(
             Path(tmp), payload, rows)
         assert json.loads(json_path.read_text(encoding="utf-8"))["rows"]
@@ -1447,6 +1609,28 @@ def self_test():
             bounds = refine_content_bounds(
                 image, (40, 150, 120, 270), min_top=140)
             assert bounds[1] >= 180
+
+            tall_path = Path(tmp) / "tall.jpg"
+            tall_path_2 = Path(tmp) / "tall-2.jpg"
+            thumbnail_path = Path(tmp) / "thumb.jpg"
+            Image.new("RGB", (100, 6200), "white").save(tall_path)
+            Image.new("RGB", (100, 3200), "gray").save(tall_path_2)
+            Image.new("RGB", (100, 100), "black").save(thumbnail_path)
+            parts = prepare_vision_images(
+                [str(tall_path), str(thumbnail_path), str(tall_path_2)],
+                Path(tmp),
+            )
+            assert len(parts) == 5
+            assert all(part["source_path"] != thumbnail_path for part in parts)
+            assert [part["slice_top"] for part in parts[:3]] == [
+                0, 3000, 6000
+            ]
+            assert [part["slice_height"] for part in parts[:3]] == [
+                3000, 3000, 200
+            ]
+            mapped = region_on_original(parts[1], [100, 250, 900, 750])
+            assert abs(mapped[1] - 604.84) < 0.1
+            assert abs(mapped[3] - 846.77) < 0.1
     assert target_name("wps") == "WPS"
     assert target_name("evernote") == "印象笔记"
     assert mode_name("local") == "无 AI 本地导出"
