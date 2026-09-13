@@ -138,6 +138,31 @@ function renderRows() {
   exportButton.disabled = rows.length === 0;
 }
 
+function verifyTableRender() {
+  const cells = [...resultsBody.querySelectorAll("td")];
+  const priceCells = [...resultsBody.querySelectorAll(".cell-price")];
+  const imagesCells = [...resultsBody.querySelectorAll(".cell-images")];
+  const priceRowsSeparate =
+    priceCells.length === rows.length &&
+    priceCells.every((cell) => cell.rowSpan === 1);
+  const imageRowsSeparate =
+    imagesCells.length === rows.length &&
+    imagesCells.every((cell) => cell.rowSpan === 1);
+  const bordersVisible = cells.every((cell) => {
+    const style = getComputedStyle(cell);
+    return (
+      parseFloat(style.borderRightWidth) > 0 &&
+      parseFloat(style.borderBottomWidth) > 0
+    );
+  });
+  return {
+    ok: priceRowsSeparate && imageRowsSeparate && bordersVisible,
+    priceRowsSeparate,
+    imageRowsSeparate,
+    bordersVisible
+  };
+}
+
 function csvValue(value) {
   let text = String(value ?? "");
   if (/^\s*[=+\-@]/.test(text)) {
@@ -201,10 +226,21 @@ async function generate() {
     }
     rows = result.rows || [];
     renderRows();
-    setStatus(
-      `已生成 ${rows.length} 行明细。` +
-      (result.notice ? ` ${result.notice}` : "")
-    );
+    const verification = verifyTableRender();
+    document.documentElement.dataset.tableVerified = String(verification.ok);
+    if (verification.ok) {
+      setStatus(
+        `已生成 ${rows.length} 行明细，表格结构和框线验证通过。` +
+        (result.notice ? ` ${result.notice}` : "")
+      );
+    } else {
+      const failed = [
+        !verification.priceRowsSeparate && "价格列仍有合并",
+        !verification.imageRowsSeparate && "图片列仍有合并",
+        !verification.bordersVisible && "单元格框线不完整"
+      ].filter(Boolean).join("、");
+      setStatus(`已生成 ${rows.length} 行明细，但验证失败：${failed}。`, "error");
+    }
   } catch (error) {
     renderRows();
     setStatus(`生成失败：${error.message}`, "error");
