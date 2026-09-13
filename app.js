@@ -10,8 +10,8 @@ const themeToggle = document.querySelector("#themeToggle");
 const columns = [
   ["publisher", "出品方"],
   ["release_date", "发售时间及地点"],
-  ["series", "系列"],
   ["ip", "IP名称"],
+  ["series", "系列"],
   ["items", "周边明细"],
   ["spec", "尺寸丨材质丨工艺"],
   ["price", "价格"],
