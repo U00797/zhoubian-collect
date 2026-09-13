@@ -16,6 +16,7 @@ from datetime import datetime
 from html import unescape
 from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from math import ceil, floor
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, unquote, urljoin, urlparse
@@ -659,9 +660,140 @@ def parse_json_message(raw):
     raise RuntimeError("图片识别没有返回有效 JSON")
 
 
-def crop_image_region(source_path, box, output_path):
+def refine_content_bounds(image, bounds, min_top=0):
     try:
-        from PIL import Image, ImageOps
+        from PIL import Image, ImageChops
+    except ImportError:
+        return bounds
+
+    width, height = image.size
+    left, top, right, bottom = bounds
+    analysis_width = min(500, width)
+    scale = analysis_width / width
+    analysis_height = max(1, round(height * scale))
+    sample = image.resize(
+        (analysis_width, analysis_height), Image.Resampling.NEAREST
+    )
+    difference = ImageChops.difference(
+        sample, Image.new("RGB", sample.size, "white")
+    ).convert("L")
+    mask = difference.point(lambda value: 255 if value > 18 else 0)
+
+    def content_runs(values, threshold, gap):
+        runs = []
+        start = None
+        last = None
+        for index, value in enumerate(values):
+            if value <= threshold:
+                continue
+            if start is None:
+                start = index
+            elif index - last > gap:
+                runs.append((start, last))
+                start = index
+            last = index
+        if start is not None:
+            runs.append((start, last))
+        return runs
+
+    search_left = max(0, floor(left * scale))
+    search_right = min(analysis_width, ceil(right * scale))
+    row_data = mask.tobytes()
+    row_counts = [
+        row_data[
+            index * analysis_width + search_left:
+            index * analysis_width + search_right
+        ].count(255)
+        for index in range(analysis_height)
+    ]
+    row_runs = content_runs(
+        row_counts,
+        max(1, round((search_right - search_left) * 0.01)),
+        max(1, round(analysis_height * 0.006)),
+    )
+    if not row_runs:
+        return bounds
+
+    minimum_height = max(2, round((bottom - top) * scale * 0.25))
+    tall_runs = [
+        run for run in row_runs
+        if run[1] - run[0] + 1 >= minimum_height
+    ]
+    if not tall_runs:
+        return bounds
+
+    target_top = top * scale
+    target_bottom = bottom * scale
+    min_top_sample = floor(min_top * scale)
+    if min_top:
+        candidates = [
+            run for run in tall_runs if run[1] + 1 > min_top_sample
+        ]
+        if not candidates:
+            return bounds
+        row_run = min(candidates, key=lambda run: run[0])
+    else:
+        overlapping_runs = [
+            run for run in tall_runs
+            if min(run[1] + 1, target_bottom) > max(run[0], target_top)
+        ]
+        if overlapping_runs:
+            row_run = max(
+                overlapping_runs,
+                key=lambda run: min(run[1] + 1, target_bottom)
+                - max(run[0], target_top),
+            )
+        else:
+            target_center = (target_top + target_bottom) / 2
+            row_run = min(
+                tall_runs,
+                key=lambda run: abs(
+                    (run[0] + run[1] + 1) / 2 - target_center
+                ),
+            )
+
+    refined_top = round(row_run[0] / scale)
+    refined_bottom = round((row_run[1] + 1) / scale)
+    if refined_top < min_top:
+        refined_top = min_top
+    if refined_bottom <= refined_top:
+        return bounds
+
+    band_top = max(0, floor(refined_top * scale))
+    band_bottom = min(analysis_height, ceil(refined_bottom * scale))
+    band = mask.crop((0, band_top, analysis_width, band_bottom))
+    column_data = band.transpose(Image.Transpose.ROTATE_270).tobytes()
+    band_height = band.height
+    column_counts = [
+        column_data[
+            index * band_height:(index + 1) * band_height
+        ].count(255)
+        for index in range(analysis_width)
+    ]
+    column_runs = content_runs(
+        column_counts,
+        max(1, round(band_height * 0.01)),
+        max(2, round(analysis_width * 0.04)),
+    )
+    target_left = left * scale
+    target_right = right * scale
+    matching_runs = [
+        run for run in column_runs
+        if run[1] + 1 >= target_left and run[0] <= target_right
+    ]
+    if not matching_runs:
+        return (left, refined_top, right, refined_bottom)
+
+    refined_left = round(min(run[0] for run in matching_runs) / scale)
+    refined_right = round(
+        (max(run[1] for run in matching_runs) + 1) / scale
+    )
+    return (refined_left, refined_top, refined_right, refined_bottom)
+
+
+def crop_image_region(source_path, box, output_path, min_top=0):
+    try:
+        from PIL import Image, ImageChops, ImageOps
     except ImportError:
         return False
 
@@ -692,19 +824,41 @@ def crop_image_region(source_path, box, output_path):
                 values[3] / 1000 * height,
             )
 
-        pad_x = max(4, round(width * 0.01))
-        pad_y = max(4, round(height * 0.01))
+        content_bounds = refine_content_bounds(
+            image, (round(left), round(top), round(right), round(bottom)),
+            min_top,
+        )
+        left, top, right, bottom = content_bounds
+        crop_width = max(1, right - left)
+        crop_height = max(1, bottom - top)
+        pad_x = max(3, round(crop_width * 0.01))
+        pad_y = max(3, round(crop_height * 0.01))
         bounds = (
-            max(0, round(left) - pad_x),
-            max(0, round(top) - pad_y),
-            min(width, round(right) + pad_x),
-            min(height, round(bottom) + pad_y),
+            max(0, left - pad_x),
+            max(0, top - pad_y),
+            min(width, right + pad_x),
+            min(height, bottom + pad_y),
         )
         if bounds[2] - bounds[0] < 20 or bounds[3] - bounds[1] < 20:
             return False
+
+        cropped = image.crop(bounds)
+        background = cropped.getpixel((0, 0))
+        difference = ImageChops.difference(
+            cropped, Image.new("RGB", cropped.size, background)
+        ).convert("L")
+        content_box = difference.point(
+            lambda value: 255 if value > 18 else 0
+        ).getbbox()
+        if content_box:
+            trimmed = cropped.crop(content_box)
+            if trimmed.width >= 20 and trimmed.height >= 20:
+                cropped = trimmed
+
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        image.crop(bounds).save(output_path, quality=95, optimize=True)
-    return True
+        cropped.save(output_path, quality=95, optimize=True)
+        return content_bounds
+    return False
 
 
 def move_unit_sale_to_price(row):
@@ -729,7 +883,7 @@ def vision_rows(cfg, payload, image_paths):
     response_path = job_dir / "vision-response.txt"
     response_path.unlink(missing_ok=True)
     keywords = "、".join(payload.get("keywords") or []) or "无"
-    prompt = f"""你是周边商品明细提取器。只依据下面的帖文和附图，不要访问网页，不要猜测，也不要补全看不清的内容。
+    prompt = f"""你是周边商品明细提取器。直接目测图片并立即输出 JSON；不要执行命令、调用工具或分析像素。只依据下面的帖文和附图，不要访问网页，不要猜测，也不要补全看不清的内容。
 
 帖文标题：{payload.get('title') or ''}
 帖文网址：{payload.get('url') or ''}
@@ -740,19 +894,19 @@ def vision_rows(cfg, payload, image_paths):
 请逐张检查全部附图，并遵守：
 1. 一张图片可能并列展示多个商品套组；每个编号、标题或独立套组各输出一行。
 2. 不同图片即使排版相似，也必须分别识别，不能因为结构相同就合并或略过。
-3. 满赠纸袋或特典不单独增加贩售商品行，将其名称、尺寸、满赠条件和“不可叠加”等信息写入每条相关记录的 notes。
+3. 满赠纸袋或特典不单独增加贩售商品行，将其名称、尺寸、满赠条件和“不可叠加”等信息写入每条相关记录的 notes；不要依据商品图中的局部款式说明生成 notes。
 4. publisher 读取“出品/出品方”，不要把“原著、授权、承制”或社交账号当作出品方；同时出现“授权”和“出品”时必须取“出品”后的主体。
 5. series 读取“系列/主题”名称，去掉方括号、书名号和结尾的“系列”字样，例如“【Golden Hour】系列”应输出“Golden Hour”。
 6. release_date 综合正文和图片，按“发售日期丨地点丨具体展位”整理。
 7. spec 紧凑合并每项商品的尺寸、材质和工艺，格式如“【徽章】尺寸约80x80mm 材质马口铁、PET 工艺细沙镭射底、烫哑金”。
 8. price 只记录售价、计价单位和销售数量或方式，例如“42CNY/组”“69CNY/只，2只/套，按套售卖”，不要把满赠、尺寸等信息写入 price。
-9. notes 只记录满赠特典及条件等补充信息；同一批商品的共同备注必须完全相同，不要把价格或销售数量写入 notes。
-10. image_regions 是该行商品在原图中的裁剪区域数组。image_index 是从 1 开始的附图编号；box 使用 [左, 上, 右, 下] 归一化坐标，范围 0-1000。
-11. 每条明细只裁出该编号/套组对应的完整区域，包括编号、标题、规格、价格和商品图，不要包含相邻套组，也不要返回整张图片。
+9. notes 只记录适用于整批商品的满赠、特典及条件；同一批商品的共同备注必须完全相同，不要把价格、销售数量、款式名称、单个商品特典或尺寸写入 notes。
+10. image_regions 是该行商品图在原图中的紧边界数组。image_index 是从 1 开始的附图编号；box 使用 [左, 上, 右, 下] 归一化坐标，范围 0-1000。
+11. 只框商品照片、套组图或商品效果图，严格排除编号、标题、规格、价格、分隔线、背景、无关文字和相邻商品；不要按固定高度切块，也不要返回整行或整张图片。默认每行只用多个商品图的合并紧边界；只有商品图相隔很远或属于明显不同套组时才返回多个框。
 12. 所有无法确认的字段使用“\\”，不要编造。
 
 只输出以下结构的 JSON，不要 Markdown，不要解释：
-{{"rows":[{{"publisher":"","release_date":"","series":"","ip":"","items":"","spec":"","price":"","image_regions":[{{"image_index":1,"box":[0,300,1000,700]}}],"notes":""}}]}}
+{{"rows":[{{"publisher":"","release_date":"","series":"","ip":"","items":"","spec":"","price":"","image_regions":[{{"image_index":1,"box":[420,575,920,685]}}],"notes":""}}]}}
 """
     cmd = [
         cli, "exec", "--ephemeral", "--skip-git-repo-check",
@@ -769,7 +923,7 @@ def vision_rows(cfg, payload, image_paths):
         proc = subprocess.run(
             cmd, cwd=str(ROOT), capture_output=True, text=True,
             encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL,
-            timeout=240,
+            timeout=360,
         )
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError("图片识别超时") from exc
@@ -804,6 +958,7 @@ def vision_rows(cfg, payload, image_paths):
     }
     rows = []
     crops_dir = job_dir / "images" / "crops"
+    crop_bottoms = {}
     for row_number, item in enumerate(items, 1):
         if not isinstance(item, dict):
             continue
@@ -820,6 +975,7 @@ def vision_rows(cfg, payload, image_paths):
         regions = item.get("image_regions")
         if not isinstance(regions, list):
             regions = []
+        row_bottoms = {}
         for region_number, region in enumerate(regions, 1):
             if not isinstance(region, dict):
                 continue
@@ -833,20 +989,20 @@ def vision_rows(cfg, payload, image_paths):
             crop_path = crops_dir / (
                 f"{row_number:02d}_{region_number:02d}_{source_path.stem}.jpg"
             )
-            if crop_image_region(source_path, region.get("box"), crop_path):
+            bounds = crop_image_region(
+                source_path, region.get("box"), crop_path,
+                crop_bottoms.get(index, 0),
+            )
+            if bounds:
                 row["images"].append(str(crop_path))
+                row_bottoms[index] = max(
+                    row_bottoms.get(index, 0), bounds[3]
+                )
+        crop_bottoms.update({
+            index: max(crop_bottoms.get(index, 0), bottom)
+            for index, bottom in row_bottoms.items()
+        })
 
-        if not row["images"]:
-            indexes = item.get("image_indexes") or item.get("image_index")
-            if not isinstance(indexes, list):
-                indexes = [indexes]
-            for value in indexes:
-                try:
-                    index = int(value)
-                except (TypeError, ValueError):
-                    continue
-                if 1 <= index <= len(image_paths):
-                    row["images"].append(str(image_paths[index - 1]))
         row["source_text"] = str(payload.get("text") or "")
         rows.append(row)
     return rows
@@ -918,6 +1074,8 @@ def web_analyze(data):
         "use_vision": True,
     }
     job = archive_job(payload)
+    if job.get("vision_error"):
+        raise RuntimeError("图片识别失败：" + job["vision_error"])
     bundle = json.loads(Path(job["result_json"]).read_text(encoding="utf-8"))
     rows = []
     for row in bundle.get("rows") or []:
@@ -1254,7 +1412,7 @@ def self_test():
         assert "39元/个" in csv_path.read_text(encoding="utf-8-sig")
         assert "测试系列" in md_path.read_text(encoding="utf-8")
         try:
-            from PIL import Image
+            from PIL import Image, ImageDraw
         except ImportError:
             pass
         else:
@@ -1266,6 +1424,29 @@ def self_test():
             with Image.open(crop_path) as cropped:
                 assert cropped.width == 100
                 assert 100 <= cropped.height <= 120
+
+            source_path = Path(tmp) / "product-row.jpg"
+            crop_path = Path(tmp) / "product-crop.jpg"
+            image = Image.new("RGB", (200, 200), "white")
+            draw = ImageDraw.Draw(image)
+            draw.rectangle((0, 0, 20, 199), fill="black")
+            draw.rectangle((40, 80, 120, 160), fill="red")
+            image.save(source_path)
+            assert crop_image_region(
+                source_path, [200, 400, 600, 800], crop_path)
+            with Image.open(crop_path) as cropped:
+                assert 80 <= cropped.width <= 84
+                assert 80 <= cropped.height <= 84
+                red, green, blue = cropped.getpixel((0, 0))
+                assert red > 150 and red > green * 4 and red > blue * 4
+
+            image = Image.new("RGB", (200, 400), "white")
+            draw = ImageDraw.Draw(image)
+            draw.rectangle((40, 40, 120, 100), fill="red")
+            draw.rectangle((40, 180, 120, 260), fill="blue")
+            bounds = refine_content_bounds(
+                image, (40, 150, 120, 270), min_top=140)
+            assert bounds[1] >= 180
     assert target_name("wps") == "WPS"
     assert target_name("evernote") == "印象笔记"
     assert mode_name("local") == "无 AI 本地导出"
