@@ -36,10 +36,10 @@ MODES = {
 EXPORT_COLUMNS = (
     ("ip", "IP"),
     ("publisher", "出品方"),
-    ("release_date", "发售时间"),
+    ("release_date", "发售时间及地点"),
     ("series", "系列"),
     ("items", "制品明细"),
-    ("spec", "尺寸材质"),
+    ("spec", "尺寸丨材质丨工艺"),
     ("price", "价格"),
     ("images", "图片"),
     ("notes", "备注"),
@@ -47,10 +47,11 @@ EXPORT_COLUMNS = (
 )
 WEB_COLUMNS = (
     ("publisher", "出品方"),
-    ("release_date", "发售时间"),
+    ("release_date", "发售时间及地点"),
+    ("series", "系列"),
     ("ip", "IP名称"),
     ("items", "周边明细"),
-    ("spec", "尺寸材质"),
+    ("spec", "尺寸丨材质丨工艺"),
     ("price", "价格"),
     ("images", "图片"),
     ("notes", "备注"),
@@ -448,7 +449,9 @@ def embedded_json(scripts):
             if not candidate:
                 continue
             try:
-                objects.append(json.loads(candidate))
+                # XHS embeds JavaScript undefined in its otherwise-JSON state.
+                objects.append(json.loads(
+                    re.sub(r"\bundefined\b", "null", candidate)))
             except json.JSONDecodeError:
                 pass
     return objects
@@ -498,8 +501,11 @@ def collect_image_values(value, images):
             collect_image_values(item, images)
     elif isinstance(value, dict):
         for key in ("urlDefault", "urlPre", "url", "large", "original", "origin"):
-            if key in value:
+            if value.get(key):
                 collect_image_values(value[key], images)
+                return
+        for item in value.values():
+            collect_image_values(item, images)
 
 
 def state_content(objects):
@@ -620,13 +626,143 @@ def normalize_images(urls, base_url):
             continue
         if IMAGE_BAD_RE.search(image_url) or IMAGE_AVATAR_RE.search(image_url):
             continue
-        if image_url in seen:
+        parsed_image = urlparse(image_url)
+        image_key = (
+            (parsed_image.hostname or "").lower(),
+            parsed_image.path,
+        )
+        if image_key in seen:
             continue
-        seen.add(image_url)
+        seen.add(image_key)
         result.append(image_url)
         if len(result) >= 40:
             break
     return result
+
+
+def parse_json_message(raw):
+    text = str(raw or "").strip()
+    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.I)
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(text):
+        if char not in "[{":
+            continue
+        try:
+            value, _ = decoder.raw_decode(text[index:])
+            return value
+        except json.JSONDecodeError:
+            continue
+    raise RuntimeError("图片识别没有返回有效 JSON")
+
+
+def vision_rows(cfg, payload, image_paths):
+    cli = resolve_codex_cli(cfg)
+    if not cli:
+        raise RuntimeError("未找到 codex 命令，无法进行图片识别")
+    if not image_paths:
+        raise RuntimeError("没有可用于图片识别的商品图")
+
+    job_dir = Path(payload["job_dir"])
+    response_path = job_dir / "vision-response.txt"
+    response_path.unlink(missing_ok=True)
+    keywords = "、".join(payload.get("keywords") or []) or "无"
+    prompt = f"""你是周边商品明细提取器。只依据下面的帖文和附图，不要访问网页，不要猜测，也不要补全看不清的内容。
+
+帖文标题：{payload.get('title') or ''}
+帖文网址：{payload.get('url') or ''}
+筛选关键词：{keywords}
+帖文正文：
+{str(payload.get('text') or '')[:12000]}
+
+请逐张检查全部附图，并遵守：
+1. 一张图片可能并列展示多个商品套组；每个编号、标题或独立套组各输出一行。
+2. 不同图片即使排版相似，也必须分别识别，不能因为结构相同就合并或略过。
+3. 满赠纸袋或特典不单独增加贩售商品行，将其名称、尺寸、满赠条件和“不可叠加”等信息写入每条相关记录的 notes。
+4. publisher 读取“出品/出品方”，不要把“原著、授权、承制”或社交账号当作出品方；同时出现“授权”和“出品”时必须取“出品”后的主体。
+5. series 读取“系列/主题”名称，去掉方括号、书名号和结尾的“系列”字样，例如“【Golden Hour】系列”应输出“Golden Hour”。
+6. release_date 综合正文和图片，按“发售日期丨地点丨具体展位”整理。
+7. spec 紧凑合并每项商品的尺寸、材质和工艺，格式如“【徽章】尺寸约80x80mm 材质马口铁、PET 工艺细沙镭射底、烫哑金”。
+8. price 按原图写法，例如“42CNY/组”，看不清则用“\\”。
+9. image_indexes 是从 1 开始的附图编号数组，填写该行商品实际出现的图片。
+10. 所有无法确认的字段使用“\\”，不要编造。
+
+只输出以下结构的 JSON，不要 Markdown，不要解释：
+{{"rows":[{{"publisher":"","release_date":"","series":"","ip":"","items":"","spec":"","price":"","image_indexes":[1],"notes":""}}]}}
+"""
+    cmd = [
+        cli, "exec", "--ephemeral", "--skip-git-repo-check",
+        "--sandbox", "read-only", "--color", "never",
+        "-c", "mcp_servers.obsidian.enabled=false",
+        "-c", "mcp_servers.baidu_netdisk.enabled=false",
+        "-c", "mcp_servers.cn-scraper.enabled=false",
+        "-c", "mcp_servers.node_repl.enabled=false",
+        "-o", str(response_path), "-i",
+    ]
+    cmd.extend(str(path) for path in image_paths)
+    cmd.extend(["--", prompt])
+    try:
+        proc = subprocess.run(
+            cmd, cwd=str(ROOT), capture_output=True, text=True,
+            encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL,
+            timeout=240,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("图片识别超时") from exc
+    if not response_path.exists():
+        detail = " ".join((proc.stderr or proc.stdout or "").split())[:240]
+        raise RuntimeError(
+            f"图片识别失败：{detail or f'进程退出码 {proc.returncode}'}"
+        )
+
+    try:
+        parsed = parse_json_message(response_path.read_text(
+            encoding="utf-8", errors="replace"))
+    except RuntimeError:
+        detail = " ".join((proc.stderr or proc.stdout or "").split())[:240]
+        raise RuntimeError(
+            f"图片识别失败：{detail or '未返回有效结果'}"
+        ) from None
+    items = parsed.get("rows") if isinstance(parsed, dict) else parsed
+    if not isinstance(items, list):
+        raise RuntimeError("图片识别结果缺少 rows")
+
+    aliases = {
+        "出品方": "publisher",
+        "发售时间及地点": "release_date",
+        "系列": "series",
+        "IP名称": "ip",
+        "周边明细": "items",
+        "尺寸丨材质丨工艺": "spec",
+        "价格": "price",
+        "图片": "image_indexes",
+        "备注": "notes",
+    }
+    rows = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        item = {aliases.get(key, key): value for key, value in item.items()}
+        row = {
+            key: str(item.get(key) or "").strip()
+            for key in (
+                "publisher", "release_date", "series", "ip", "items", "spec",
+                "price", "notes",
+            )
+        }
+        indexes = item.get("image_indexes") or item.get("image_index")
+        if not isinstance(indexes, list):
+            indexes = [indexes]
+        row["images"] = []
+        for value in indexes:
+            try:
+                index = int(value)
+            except (TypeError, ValueError):
+                continue
+            if 1 <= index <= len(image_paths):
+                row["images"].append(str(image_paths[index - 1]))
+        row["source_text"] = str(payload.get("text") or "")
+        rows.append(row)
+    return rows
 
 
 def analyze_source(url, keywords):
@@ -692,6 +828,7 @@ def web_analyze(data):
         "text": source["text"],
         "images": source["images"],
         "keywords": keywords,
+        "use_vision": True,
     }
     job = archive_job(payload)
     bundle = json.loads(Path(job["result_json"]).read_text(encoding="utf-8"))
@@ -721,6 +858,7 @@ def web_analyze(data):
             "title": source["title"],
         },
         "rows": rows,
+        "notice": job.get("vision_error") or "",
     }
 
 
@@ -809,6 +947,19 @@ def archive_job(data):
     source_path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     rows = extract_rows(payload)
+    vision_error = ""
+    vision_used = False
+    if mode == "local" and data.get("use_vision"):
+        payload["job_dir"] = str(job_dir)
+        try:
+            visual_rows = vision_rows(cfg, payload, image_paths)
+            if visual_rows:
+                rows = visual_rows
+                vision_used = True
+            else:
+                raise RuntimeError("图片识别没有生成明细")
+        except RuntimeError as exc:
+            vision_error = str(exc)
     json_path, csv_path, md_path = write_result_bundle(job_dir, payload, rows)
 
     if mode == "ai":
@@ -820,8 +971,11 @@ def archive_job(data):
         ).rstrip()
     else:
         note = f"；{len(failed)} 张图下载失败" if failed else ""
+        if vision_error:
+            note += f"；图片识别失败，已回退本地解析：{vision_error}"
         message = (
-            f"已生成 {len(rows)} 行本地结果（任务 {job_id}，"
+            f"已生成 {len(rows)} 行"
+            f"{'图片识别' if vision_used else '本地'}结果（任务 {job_id}，"
             f"图片 {len(image_paths)} 张{note}）。结果：{job_dir}"
         )
     return {
@@ -834,6 +988,8 @@ def archive_job(data):
         "result_md": str(md_path),
         "images": len(image_paths),
         "message": message,
+        "vision_used": vision_used,
+        "vision_error": vision_error,
     }
 
 
@@ -994,6 +1150,7 @@ def self_test():
         rows = extract_rows(payload)
         assert len(rows) == 1
         assert rows[0]["ip"] == "测试作品"
+        assert rows[0]["series"] == "测试系列"
         assert rows[0]["price"] == "39元/个"
         assert "尺寸：10cm" in rows[0]["spec"]
         assert "满赠" in rows[0]["notes"]
@@ -1016,6 +1173,19 @@ def self_test():
     parsed = state_content(state)
     assert parsed["text"] == "立牌 39元/个"
     assert parsed["images"] == ["https://example.com/a.jpg"]
+    state = embedded_json([
+        'window.__INITIAL_STATE__={"note":{"desc":"立牌 39元/个",'
+        '"missing":undefined,"imageList":['
+        '{"urlDefault":"https://example.com/a.jpg"},'
+        '{"urlDefault":"https://example.com/b.jpg"}]}}'
+    ])
+    parsed = state_content(state)
+    assert parsed["images"] == [
+        "https://example.com/a.jpg", "https://example.com/b.jpg"
+    ]
+    assert parse_json_message(
+        '```json\n{"rows":[{"publisher":"长佩文学"}]}\n```'
+    )["rows"][0]["publisher"] == "长佩文学"
     assert normalize_images([
         "https://sns-webpic.xhscdn.com/a.jpg",
         "http://127.0.0.1/private.jpg",

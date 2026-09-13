@@ -9,10 +9,11 @@ const themeToggle = document.querySelector("#themeToggle");
 
 const columns = [
   ["publisher", "出品方"],
-  ["release_date", "发售时间"],
+  ["release_date", "发售时间及地点"],
+  ["series", "系列"],
   ["ip", "IP名称"],
   ["items", "周边明细"],
-  ["spec", "尺寸材质"],
+  ["spec", "尺寸丨材质丨工艺"],
   ["price", "价格"],
   ["images", "图片"],
   ["notes", "备注"]
@@ -138,7 +139,10 @@ async function generate() {
     }
     rows = result.rows || [];
     renderRows();
-    setStatus(`已生成 ${rows.length} 行明细。`);
+    setStatus(
+      `已生成 ${rows.length} 行明细。` +
+      (result.notice ? ` ${result.notice}` : "")
+    );
   } catch (error) {
     renderRows();
     setStatus(`生成失败：${error.message}`, "error");

@@ -71,10 +71,11 @@ main {
 }
 
 .workspace {
+  position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1fr) 340px;
   gap: 28px;
-  padding: 28px 0 32px;
+  padding: 28px 0 96px;
   border-top: 1px solid var(--border);
   border-bottom: 1px solid var(--border);
 }
@@ -114,7 +115,7 @@ input:focus {
 
 .action-field {
   display: grid;
-  grid-template-rows: auto 46px 46px;
+  grid-template-rows: auto 46px;
   align-content: start;
   gap: 8px;
 }
@@ -141,9 +142,12 @@ button:disabled {
 }
 
 .primary-button {
+  position: absolute;
+  bottom: 28px;
+  left: 50%;
   width: 180px;
   height: 46px;
-  justify-self: center;
+  transform: translateX(-50%);
   border: 1px solid var(--accent);
   background: var(--accent);
   color: var(--accent-text);
@@ -211,7 +215,7 @@ h2 {
 
 table {
   width: 100%;
-  min-width: 1020px;
+  min-width: 1160px;
   border-collapse: collapse;
   table-layout: fixed;
 }
@@ -244,13 +248,14 @@ th {
 }
 
 th:nth-child(1) { width: 105px; }
-th:nth-child(2) { width: 115px; }
+th:nth-child(2) { width: 150px; }
 th:nth-child(3) { width: 105px; }
-th:nth-child(4) { width: 160px; }
-th:nth-child(5) { width: 160px; }
-th:nth-child(6) { width: 105px; }
-th:nth-child(7) { width: 125px; }
-th:nth-child(8) { width: 145px; }
+th:nth-child(4) { width: 105px; }
+th:nth-child(5) { width: 165px; }
+th:nth-child(6) { width: 210px; }
+th:nth-child(7) { width: 120px; }
+th:nth-child(8) { width: 120px; }
+th:nth-child(9) { width: 150px; }
 
 .empty-value {
   color: var(--muted);
