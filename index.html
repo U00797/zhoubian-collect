@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>周边明细生成器</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1>周边明细生成器</h1>
+    <button id="themeToggle" class="secondary-button" type="button" aria-pressed="false">夜间模式</button>
+  </header>
+
+  <main>
+    <section class="workspace" aria-label="周边明细生成">
+      <div class="url-field">
+        <label for="sourceUrl">微博或小红书网址</label>
+        <input id="sourceUrl" type="url" inputmode="url" autocomplete="url"
+               placeholder="https://...">
+      </div>
+
+      <div class="action-field">
+        <label for="keywords">关键词（非必填）</label>
+        <input id="keywords" type="text" placeholder="多个关键词用逗号分隔">
+        <button id="generateButton" class="primary-button" type="button">生成周边明细</button>
+      </div>
+    </section>
+
+    <section class="results" aria-labelledby="resultsTitle">
+      <div class="results-heading">
+        <h2 id="resultsTitle">周边明细</h2>
+        <button id="exportButton" class="secondary-button" type="button" disabled>导出 CSV</button>
+      </div>
+      <p id="status" class="status">等待生成</p>
+      <div id="tableWrap" class="table-wrap" hidden>
+        <table>
+          <thead>
+            <tr>
+              <th>出品方</th>
+              <th>发售时间</th>
+              <th>IP名称</th>
+              <th>周边明细</th>
+              <th>尺寸材质</th>
+              <th>价格</th>
+              <th>图片</th>
+              <th>备注</th>
+            </tr>
+          </thead>
+          <tbody id="resultsBody"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>
