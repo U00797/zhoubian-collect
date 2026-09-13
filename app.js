@@ -85,6 +85,9 @@ function rowCellValue(row, key) {
 function buildRowSpans() {
   return columns.map(([key]) => {
     const spans = Array(rows.length).fill(1);
+    if (["items", "spec", "price", "images"].includes(key)) {
+      return spans;
+    }
     let start = 0;
     while (start < rows.length) {
       let end = start + 1;

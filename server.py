@@ -655,6 +655,54 @@ def parse_json_message(raw):
     raise RuntimeError("图片识别没有返回有效 JSON")
 
 
+def crop_image_region(source_path, box, output_path):
+    try:
+        from PIL import Image, ImageOps
+    except ImportError:
+        return False
+
+    try:
+        values = [float(value) for value in box]
+    except (TypeError, ValueError):
+        return False
+    if len(values) != 4:
+        return False
+
+    with Image.open(source_path) as source:
+        image = ImageOps.exif_transpose(source).convert("RGB")
+        width, height = image.size
+        if max(values) > 1000:
+            left, top, right, bottom = values
+        elif max(values) <= 1:
+            left, top, right, bottom = (
+                values[0] * width,
+                values[1] * height,
+                values[2] * width,
+                values[3] * height,
+            )
+        else:
+            left, top, right, bottom = (
+                values[0] / 1000 * width,
+                values[1] / 1000 * height,
+                values[2] / 1000 * width,
+                values[3] / 1000 * height,
+            )
+
+        pad_x = max(4, round(width * 0.01))
+        pad_y = max(4, round(height * 0.01))
+        bounds = (
+            max(0, round(left) - pad_x),
+            max(0, round(top) - pad_y),
+            min(width, round(right) + pad_x),
+            min(height, round(bottom) + pad_y),
+        )
+        if bounds[2] - bounds[0] < 20 or bounds[3] - bounds[1] < 20:
+            return False
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        image.crop(bounds).save(output_path, quality=95, optimize=True)
+    return True
+
+
 def vision_rows(cfg, payload, image_paths):
     cli = resolve_codex_cli(cfg)
     if not cli:
@@ -683,11 +731,12 @@ def vision_rows(cfg, payload, image_paths):
 6. release_date 综合正文和图片，按“发售日期丨地点丨具体展位”整理。
 7. spec 紧凑合并每项商品的尺寸、材质和工艺，格式如“【徽章】尺寸约80x80mm 材质马口铁、PET 工艺细沙镭射底、烫哑金”。
 8. price 按原图写法，例如“42CNY/组”，看不清则用“\\”。
-9. image_indexes 是从 1 开始的附图编号数组，填写该行商品实际出现的图片。
-10. 所有无法确认的字段使用“\\”，不要编造。
+9. image_regions 是该行商品在原图中的裁剪区域数组。image_index 是从 1 开始的附图编号；box 使用 [左, 上, 右, 下] 归一化坐标，范围 0-1000。
+10. 每条明细只裁出该编号/套组对应的完整区域，包括编号、标题、规格、价格和商品图，不要包含相邻套组，也不要返回整张图片。
+11. 所有无法确认的字段使用“\\”，不要编造。
 
 只输出以下结构的 JSON，不要 Markdown，不要解释：
-{{"rows":[{{"publisher":"","release_date":"","series":"","ip":"","items":"","spec":"","price":"","image_indexes":[1],"notes":""}}]}}
+{{"rows":[{{"publisher":"","release_date":"","series":"","ip":"","items":"","spec":"","price":"","image_regions":[{{"image_index":1,"box":[0,300,1000,700]}}],"notes":""}}]}}
 """
     cmd = [
         cli, "exec", "--ephemeral", "--skip-git-repo-check",
@@ -734,11 +783,12 @@ def vision_rows(cfg, payload, image_paths):
         "周边明细": "items",
         "尺寸丨材质丨工艺": "spec",
         "价格": "price",
-        "图片": "image_indexes",
+        "图片": "image_regions",
         "备注": "notes",
     }
     rows = []
-    for item in items:
+    crops_dir = job_dir / "images" / "crops"
+    for row_number, item in enumerate(items, 1):
         if not isinstance(item, dict):
             continue
         item = {aliases.get(key, key): value for key, value in item.items()}
@@ -749,17 +799,37 @@ def vision_rows(cfg, payload, image_paths):
                 "price", "notes",
             )
         }
-        indexes = item.get("image_indexes") or item.get("image_index")
-        if not isinstance(indexes, list):
-            indexes = [indexes]
         row["images"] = []
-        for value in indexes:
+        regions = item.get("image_regions")
+        if not isinstance(regions, list):
+            regions = []
+        for region_number, region in enumerate(regions, 1):
+            if not isinstance(region, dict):
+                continue
             try:
-                index = int(value)
+                index = int(region.get("image_index"))
             except (TypeError, ValueError):
                 continue
-            if 1 <= index <= len(image_paths):
-                row["images"].append(str(image_paths[index - 1]))
+            if not 1 <= index <= len(image_paths):
+                continue
+            source_path = Path(image_paths[index - 1])
+            crop_path = crops_dir / (
+                f"{row_number:02d}_{region_number:02d}_{source_path.stem}.jpg"
+            )
+            if crop_image_region(source_path, region.get("box"), crop_path):
+                row["images"].append(str(crop_path))
+
+        if not row["images"]:
+            indexes = item.get("image_indexes") or item.get("image_index")
+            if not isinstance(indexes, list):
+                indexes = [indexes]
+            for value in indexes:
+                try:
+                    index = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if 1 <= index <= len(image_paths):
+                    row["images"].append(str(image_paths[index - 1]))
         row["source_text"] = str(payload.get("text") or "")
         rows.append(row)
     return rows
@@ -1159,6 +1229,19 @@ def self_test():
         assert json.loads(json_path.read_text(encoding="utf-8"))["rows"]
         assert "39元/个" in csv_path.read_text(encoding="utf-8-sig")
         assert "测试系列" in md_path.read_text(encoding="utf-8")
+        try:
+            from PIL import Image
+        except ImportError:
+            pass
+        else:
+            source_path = Path(tmp) / "source.jpg"
+            crop_path = Path(tmp) / "crop.jpg"
+            Image.new("RGB", (100, 200), "white").save(source_path)
+            assert crop_image_region(
+                source_path, [0, 250, 1000, 750], crop_path)
+            with Image.open(crop_path) as cropped:
+                assert cropped.width == 100
+                assert 100 <= cropped.height <= 120
     assert target_name("wps") == "WPS"
     assert target_name("evernote") == "印象笔记"
     assert mode_name("local") == "无 AI 本地导出"

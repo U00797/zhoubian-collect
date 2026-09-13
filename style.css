@@ -262,7 +262,7 @@ th {
   white-space: pre-line;
 }
 .cell-price { min-width: 105px; }
-.cell-images { min-width: 70px; }
+.cell-images { min-width: 136px; }
 .cell-notes { min-width: 180px; max-width: 280px; }
 
 .empty-value {
@@ -279,8 +279,8 @@ th {
 
 .image-list a {
   display: block;
-  width: 58px;
-  height: 58px;
+  width: 120px;
+  height: 64px;
   overflow: hidden;
   border: 1px solid var(--border);
   border-radius: 5px;
@@ -290,7 +290,7 @@ th {
 .image-list img {
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  object-fit: contain;
 }
 
 @media (max-width: 760px) {
