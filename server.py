@@ -72,7 +72,6 @@ UNIT_SALE_RE = re.compile(
     r"^\s*(\d+\s*(?:只|个|件|枚|对|套|组|盒|包|款|份)"
     r"\s*[/／]\s*套[，,、；;]?\s*按套售卖)\s*[；;]?\s*"
 )
-WEIBO_BASE62 = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 IMAGE_BAD_RE = re.compile(r"data:|\.(?:svg|gif)(?:\?|$)", re.I)
 IMAGE_AVATAR_RE = re.compile(r"avatar|profile_pic|orj360|thumb150|/(?:30|50)/", re.I)
 
@@ -324,8 +323,8 @@ def allowed_source_url(url):
     )
 
 
-def fetch_text(url, accept="text/html,application/xhtml+xml"):
-    req = Request(url, headers={
+def fetch_text(url, accept="text/html,application/xhtml+xml", headers=None):
+    request_headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -334,7 +333,9 @@ def fetch_text(url, accept="text/html,application/xhtml+xml"):
         "Accept": accept,
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.7",
         "Referer": "https://www.xiaohongshu.com/" if "xiaohongshu" in url else "https://weibo.com/",
-    })
+    }
+    request_headers.update(headers or {})
+    req = Request(url, headers=request_headers)
     try:
         with urlopen(req, timeout=30) as response:
             raw = response.read(5 * 1024 * 1024 + 1)
@@ -552,31 +553,21 @@ def html_text(raw):
     return "\n".join(clean_lines("".join(parser.text)))
 
 
-def weibo_mid_to_id(mid):
-    value = 0
-    for char in str(mid or ""):
-        if char not in WEIBO_BASE62:
-            return ""
-        value = value * 62 + WEIBO_BASE62.index(char)
-    return str(value) if value else ""
-
-
 def weibo_status_id(url):
     parsed = urlparse(url)
     query_id = parse_qs(parsed.query).get("id", [""])[0]
-    if query_id.isdigit():
+    if re.fullmatch(r"[0-9A-Za-z]+", query_id or ""):
         return query_id
     patterns = (
-        r"/status/(\d+)",
-        r"/detail/(\d+)",
-        r"/statuses/show/(\d+)",
+        r"/status/([0-9A-Za-z]+)",
+        r"/detail/([0-9A-Za-z]+)",
+        r"/statuses/show/([0-9A-Za-z]+)",
         r"/\d+/([0-9A-Za-z]+)",
     )
     for pattern in patterns:
         match = re.search(pattern, parsed.path)
         if match:
-            value = match.group(1)
-            return value if value.isdigit() else weibo_mid_to_id(value)
+            return match.group(1)
     return ""
 
 
@@ -587,6 +578,14 @@ def fetch_weibo_post(url):
     _, raw = fetch_text(
         f"https://m.weibo.cn/statuses/show?id={quote(status_id)}",
         accept="application/json,text/plain,*/*",
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Linux; Android 14; Pixel 8) "
+                "AppleWebKit/537.36 Chrome/140 Mobile Safari/537.36"
+            ),
+            "Referer": "https://m.weibo.cn/",
+            "X-Requested-With": "XMLHttpRequest",
+        },
     )
     try:
         data = json.loads(raw).get("data") or {}
@@ -598,8 +597,9 @@ def fetch_weibo_post(url):
     for item in data.get("pics") or []:
         if not isinstance(item, dict):
             continue
-        images.append(
-            nested_text(item.get("large") or item.get("original") or item.get("url"))
+        collect_image_values(
+            item.get("large") or item.get("original") or item.get("url"),
+            images,
         )
     return {
         "platform": "weibo",
@@ -1272,7 +1272,15 @@ def self_test():
     assert allowed_source_url("https://www.xiaohongshu.com/explore/example")
     assert allowed_source_url("https://m.weibo.cn/detail/123")
     assert not allowed_source_url("https://example.com/post")
-    assert weibo_mid_to_id("10") == "62"
+    assert weibo_status_id(
+        "https://weibo.com/7910915063/RhhYAn0gk"
+    ) == "RhhYAn0gk"
+    assert weibo_status_id("https://m.weibo.cn/status/RhhYAn0gk") == (
+        "RhhYAn0gk"
+    )
+    assert weibo_status_id("https://m.weibo.cn/detail/5341206805482556") == (
+        "5341206805482556"
+    )
     state = embedded_json([
         'window.__INITIAL_STATE__={"note":{"desc":"立牌 39元/个",'
         '"imageList":[{"urlDefault":"https://example.com/a.jpg"}]}}'
