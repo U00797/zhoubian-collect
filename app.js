@@ -18,6 +18,9 @@ const columns = [
   ["images", "图片"],
   ["notes", "备注"]
 ];
+const mergeableColumns = new Set([
+  "publisher", "release_date", "ip", "series", "notes"
+]);
 
 let rows = [];
 
@@ -85,7 +88,7 @@ function rowCellValue(row, key) {
 function buildRowSpans() {
   return columns.map(([key]) => {
     const spans = Array(rows.length).fill(1);
-    if (["items", "spec", "price", "images"].includes(key)) {
+    if (!mergeableColumns.has(key)) {
       return spans;
     }
     let start = 0;
