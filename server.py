@@ -792,7 +792,7 @@ def refine_content_bounds(image, bounds, min_top=0):
     return (refined_left, refined_top, refined_right, refined_bottom)
 
 
-def crop_image_region(source_path, box, output_path, min_top=0):
+def crop_image_region(source_path, box, output_path, min_top=0, refine=True):
     try:
         from PIL import Image, ImageChops, ImageOps
     except ImportError:
@@ -825,9 +825,13 @@ def crop_image_region(source_path, box, output_path, min_top=0):
                 values[3] / 1000 * height,
             )
 
-        content_bounds = refine_content_bounds(
-            image, (round(left), round(top), round(right), round(bottom)),
-            min_top,
+        content_bounds = (
+            refine_content_bounds(
+                image, (round(left), round(top), round(right), round(bottom)),
+                min_top,
+            )
+            if refine
+            else (round(left), round(top), round(right), round(bottom))
         )
         left, top, right, bottom = content_bounds
         crop_width = max(1, right - left)
@@ -981,6 +985,35 @@ def region_on_original(part, box):
     ]
 
 
+def merge_regions_by_source(regions, vision_parts):
+    grouped = {}
+    for region in regions:
+        if not isinstance(region, dict):
+            continue
+        try:
+            index = int(region.get("image_index"))
+        except (TypeError, ValueError):
+            continue
+        if not 1 <= index <= len(vision_parts):
+            continue
+        part = vision_parts[index - 1]
+        box = region_on_original(part, region.get("box"))
+        if not box:
+            continue
+        source_key = str(part["source_path"])
+        if source_key not in grouped:
+            grouped[source_key] = [part["source_path"], box]
+            continue
+        merged = grouped[source_key][1]
+        grouped[source_key][1] = [
+            min(merged[0], box[0]),
+            min(merged[1], box[1]),
+            max(merged[2], box[2]),
+            max(merged[3], box[3]),
+        ]
+    return list(grouped.values())
+
+
 def normalize_series_from_spec(rows, row_sources):
     series_counts = {}
     for row, sources in zip(rows, row_sources):
@@ -1096,7 +1129,6 @@ def vision_rows(cfg, payload, image_paths):
     rows = []
     row_sources = []
     crops_dir = job_dir / "images" / "crops"
-    crop_bottoms = {}
     for row_number, item in enumerate(items, 1):
         if not isinstance(item, dict):
             continue
@@ -1113,40 +1145,19 @@ def vision_rows(cfg, payload, image_paths):
         regions = item.get("image_regions")
         if not isinstance(regions, list):
             regions = []
-        row_bottoms = {}
         sources = set()
-        for region_number, region in enumerate(regions, 1):
-            if not isinstance(region, dict):
-                continue
-            try:
-                index = int(region.get("image_index"))
-            except (TypeError, ValueError):
-                continue
-            if not 1 <= index <= len(vision_parts):
-                continue
-            part = vision_parts[index - 1]
-            source_path = part["source_path"]
+        for region_number, (source_path, original_box) in enumerate(
+            merge_regions_by_source(regions, vision_parts), 1
+        ):
             sources.add(str(source_path))
-            original_box = region_on_original(part, region.get("box"))
-            if not original_box:
-                continue
             crop_path = crops_dir / (
                 f"{row_number:02d}_{region_number:02d}_{source_path.stem}.jpg"
             )
             bounds = crop_image_region(
-                source_path, original_box, crop_path,
-                crop_bottoms.get(str(source_path), 0),
+                source_path, original_box, crop_path, refine=False,
             )
             if bounds:
                 row["images"].append(str(crop_path))
-                source_key = str(source_path)
-                row_bottoms[source_key] = max(
-                    row_bottoms.get(source_key, 0), bounds[3]
-                )
-        crop_bottoms.update({
-            source_key: max(crop_bottoms.get(source_key, 0), bottom)
-            for source_key, bottom in row_bottoms.items()
-        })
 
         row["source_text"] = str(payload.get("text") or "")
         rows.append(row)
@@ -1601,6 +1612,16 @@ def self_test():
                 assert 80 <= cropped.height <= 84
                 red, green, blue = cropped.getpixel((0, 0))
                 assert red > 150 and red > green * 4 and red > blue * 4
+            direct_path = Path(tmp) / "product-direct-crop.jpg"
+            assert crop_image_region(
+                source_path, [200, 400, 600, 800], direct_path,
+                refine=False,
+            )
+            with Image.open(direct_path) as cropped:
+                assert 80 <= cropped.width <= 84
+                assert 80 <= cropped.height <= 84
+                red, green, blue = cropped.getpixel((0, 0))
+                assert red > 150 and red > green * 4 and red > blue * 4
 
             image = Image.new("RGB", (200, 400), "white")
             draw = ImageDraw.Draw(image)
@@ -1631,6 +1652,16 @@ def self_test():
             mapped = region_on_original(parts[1], [100, 250, 900, 750])
             assert abs(mapped[1] - 604.84) < 0.1
             assert abs(mapped[3] - 846.77) < 0.1
+            merged = merge_regions_by_source([
+                {"image_index": 1, "box": [200, 800, 900, 1000]},
+                {"image_index": 2, "box": [100, 0, 800, 100]},
+            ], parts)
+            assert len(merged) == 1
+            assert merged[0][0] == tall_path
+            merged_box = merged[0][1]
+            assert merged_box[0] == 100 and merged_box[2] == 900
+            assert abs(merged_box[1] - 387.1) < 0.1
+            assert abs(merged_box[3] - 532.26) < 0.1
     assert target_name("wps") == "WPS"
     assert target_name("evernote") == "印象笔记"
     assert mode_name("local") == "无 AI 本地导出"
