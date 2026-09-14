@@ -3,6 +3,7 @@ const keywords = document.querySelector("#keywords");
 const generateButton = document.querySelector("#generateButton");
 const exportButton = document.querySelector("#exportButton");
 const excelButton = document.querySelector("#excelButton");
+const mdButton = document.querySelector("#mdButton");
 const status = document.querySelector("#status");
 const tableWrap = document.querySelector("#tableWrap");
 const resultsBody = document.querySelector("#resultsBody");
@@ -25,6 +26,7 @@ const mergeableColumns = new Set([
 
 let rows = [];
 let xlsxUrl = "";
+let mdUrl = "";
 
 function setStatus(message, type = "") {
   status.textContent = message;
@@ -139,6 +141,7 @@ function renderRows() {
   tableWrap.hidden = rows.length === 0;
   exportButton.disabled = rows.length === 0;
   excelButton.disabled = rows.length === 0 || !xlsxUrl;
+  mdButton.disabled = rows.length === 0 || !mdUrl;
 }
 
 function verifyTableRender() {
@@ -212,6 +215,15 @@ function exportExcel() {
   link.click();
 }
 
+function exportMarkdown() {
+  if (!mdUrl) return;
+  const link = document.createElement("a");
+  const stamp = new Date().toISOString().replace(/\D/g, "").slice(0, 12);
+  link.href = mdUrl;
+  link.download = `周边明细_${stamp}.md`;
+  link.click();
+}
+
 async function generate() {
   const url = sourceUrl.value.trim();
   if (!url) {
@@ -223,9 +235,11 @@ async function generate() {
   generateButton.disabled = true;
   exportButton.disabled = true;
   excelButton.disabled = true;
+  mdButton.disabled = true;
   tableWrap.hidden = true;
   rows = [];
   xlsxUrl = "";
+  mdUrl = "";
   setStatus("正在获取链接并生成明细…", "loading");
 
   try {
@@ -240,6 +254,7 @@ async function generate() {
     }
     rows = result.rows || [];
     xlsxUrl = result.xlsx_url || "";
+    mdUrl = result.md_url || "";
     renderRows();
     const verification = verifyTableRender();
     document.documentElement.dataset.tableVerified = String(verification.ok);
@@ -263,6 +278,7 @@ async function generate() {
     generateButton.disabled = false;
     exportButton.disabled = rows.length === 0;
     excelButton.disabled = rows.length === 0 || !xlsxUrl;
+    mdButton.disabled = rows.length === 0 || !mdUrl;
   }
 }
 
@@ -283,6 +299,7 @@ themeToggle.addEventListener("click", () => {
 generateButton.addEventListener("click", generate);
 exportButton.addEventListener("click", exportCsv);
 excelButton.addEventListener("click", exportExcel);
+mdButton.addEventListener("click", exportMarkdown);
 sourceUrl.addEventListener("keydown", (event) => {
   if (event.key === "Enter") generate();
 });

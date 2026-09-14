@@ -214,6 +214,18 @@ def markdown_cell(value):
     return str(value or "").replace("|", "\\|").replace("\n", "<br>")
 
 
+def markdown_image_cell(job_dir, value):
+    images = []
+    for raw_path in value if isinstance(value, list) else []:
+        path = Path(raw_path)
+        try:
+            relative = path.resolve().relative_to(Path(job_dir).resolve()).as_posix()
+        except (OSError, ValueError):
+            relative = str(raw_path)
+        images.append(f"![周边图片]({relative})")
+    return "<br>".join(images) if images else "\\"
+
+
 def write_result_xlsx(job_dir, rows):
     try:
         from openpyxl import Workbook
@@ -332,9 +344,9 @@ def write_result_bundle(job_dir, payload, rows):
             ])
 
     md_path = job_dir / "result.md"
-    headers = [label for _, label in EXPORT_COLUMNS]
+    headers = [label for _, label in WEB_COLUMNS]
     md_lines = [
-        f"# {payload['title'] or '周边识别结果'}",
+        "# " + str(payload['title'] or '周边识别结果').splitlines()[0].strip(),
         "",
         f"- 来源：{payload['url']}",
         f"- 平台：{payload['platform']}",
@@ -344,9 +356,12 @@ def write_result_bundle(job_dir, payload, rows):
         "| " + " | ".join("---" for _ in headers) + " |",
     ]
     for row in public_rows:
-        md_lines.append(
-            "| " + " | ".join(markdown_cell(row[key]) for key, _ in EXPORT_COLUMNS)
-            + " |")
+        cells = [
+            markdown_image_cell(job_dir, row[key])
+            if key == "images" else markdown_cell(row[key])
+            for key, _ in WEB_COLUMNS
+        ]
+        md_lines.append("| " + " | ".join(cells) + " |")
     md_path.write_text("\n".join(md_lines) + "\n", encoding="utf-8")
     xlsx_path = write_result_xlsx(job_dir, public_rows)
     return json_path, csv_path, md_path, xlsx_path
@@ -1300,6 +1315,16 @@ def analyze_source(url, keywords):
     }
 
 
+def output_url(path):
+    if not path:
+        return ""
+    try:
+        relative = Path(path).resolve().relative_to(ROOT).as_posix()
+    except (OSError, ValueError):
+        return ""
+    return "/" + quote(relative)
+
+
 def web_analyze(data):
     url = str(data.get("url") or "").strip()
     keywords = keyword_list(data.get("keywords"))
@@ -1337,14 +1362,6 @@ def web_analyze(data):
             else:
                 item[key] = value
         rows.append(item)
-    xlsx_url = ""
-    xlsx_path = job.get("result_xlsx")
-    if xlsx_path:
-        try:
-            relative = Path(xlsx_path).resolve().relative_to(ROOT).as_posix()
-            xlsx_url = "/" + quote(relative)
-        except (OSError, ValueError):
-            pass
     return {
         "ok": True,
         "job_id": job["job_id"],
@@ -1354,7 +1371,8 @@ def web_analyze(data):
             "title": source["title"],
         },
         "rows": rows,
-        "xlsx_url": xlsx_url,
+        "md_url": output_url(job.get("result_md")),
+        "xlsx_url": output_url(job.get("result_xlsx")),
         "notice": job.get("vision_error") or "",
     }
 
@@ -1679,7 +1697,9 @@ def self_test():
             Path(tmp), payload, rows)
         assert json.loads(json_path.read_text(encoding="utf-8"))["rows"]
         assert "39元/个" in csv_path.read_text(encoding="utf-8-sig")
-        assert "测试系列" in md_path.read_text(encoding="utf-8")
+        md_text = md_path.read_text(encoding="utf-8")
+        assert "测试系列" in md_text
+        assert "![周边图片](" in md_text
         if xlsx_path:
             assert xlsx_path.exists()
         try:
