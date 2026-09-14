@@ -15,5 +15,15 @@ if not defined PY (
   pause
   exit /b 1
 )
+%PY% -c "import PIL, openpyxl" >nul 2>nul
+if errorlevel 1 (
+  echo Installing required packages...
+  %PY% -m pip install -r requirements.txt
+  if errorlevel 1 (
+    echo Failed to install dependencies.
+    pause
+    exit /b 1
+  )
+)
 %PY% server.py
 if errorlevel 1 pause

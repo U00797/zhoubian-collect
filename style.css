@@ -173,6 +173,13 @@ button:disabled {
   gap: 20px;
 }
 
+.results-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 h2 {
   margin: 0;
   font-size: 19px;

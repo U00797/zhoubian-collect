@@ -214,6 +214,90 @@ def markdown_cell(value):
     return str(value or "").replace("|", "\\|").replace("\n", "<br>")
 
 
+def write_result_xlsx(job_dir, rows):
+    try:
+        from openpyxl import Workbook
+        from openpyxl.drawing.image import Image as XLImage
+        from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+        from openpyxl.utils import get_column_letter
+    except ImportError:
+        return None
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "周边明细"
+    headers = [label for _, label in WEB_COLUMNS]
+    sheet.append(headers)
+    for row in rows:
+        sheet.append([
+            "" if key == "images" else row.get(key, "")
+            for key, _ in WEB_COLUMNS
+        ])
+
+    border = Border(
+        left=Side(style="thin", color="D9CDB4"),
+        right=Side(style="thin", color="D9CDB4"),
+        top=Side(style="thin", color="D9CDB4"),
+        bottom=Side(style="thin", color="D9CDB4"),
+    )
+    alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    for row in sheet.iter_rows(min_row=1, max_row=sheet.max_row, max_col=len(WEB_COLUMNS)):
+        for cell in row:
+            cell.alignment = alignment
+            cell.border = border
+    for cell in sheet[1]:
+        cell.font = Font(bold=True)
+        cell.fill = PatternFill("solid", fgColor="FAF4E3")
+
+    mergeable = {"publisher", "release_date", "ip", "series", "notes"}
+    for column_index, (key, _) in enumerate(WEB_COLUMNS, 1):
+        if key not in mergeable:
+            continue
+        start = 0
+        while start < len(rows):
+            value = str(rows[start].get(key) or "\\").strip()
+            end = start + 1
+            while end < len(rows):
+                if str(rows[end].get(key) or "\\").strip() != value:
+                    break
+                end += 1
+            if end - start > 1:
+                sheet.merge_cells(
+                    start_row=start + 2,
+                    start_column=column_index,
+                    end_row=end + 1,
+                    end_column=column_index,
+                )
+            start = end
+
+    widths = [18, 34, 18, 18, 22, 36, 16, 22, 48]
+    for column_index, width in enumerate(widths, 1):
+        sheet.column_dimensions[get_column_letter(column_index)].width = width
+    sheet.freeze_panes = "A2"
+
+    image_column = next(
+        index for index, (key, _) in enumerate(WEB_COLUMNS, 1)
+        if key == "images"
+    )
+    image_letter = get_column_letter(image_column)
+    for row_index, row in enumerate(rows, 2):
+        images = row.get("images") or []
+        if not images or not Path(images[0]).is_file():
+            continue
+        image = XLImage(images[0])
+        scale = min(1, 140 / image.width, 140 / image.height)
+        image.width = max(1, round(image.width * scale))
+        image.height = max(1, round(image.height * scale))
+        sheet.add_image(image, f"{image_letter}{row_index}")
+        sheet.row_dimensions[row_index].height = max(
+            90, image.height * 0.75 + 8
+        )
+
+    xlsx_path = job_dir / "result.xlsx"
+    workbook.save(xlsx_path)
+    return xlsx_path
+
+
 def write_result_bundle(job_dir, payload, rows):
     public_rows = []
     for row in rows:
@@ -264,7 +348,8 @@ def write_result_bundle(job_dir, payload, rows):
             "| " + " | ".join(markdown_cell(row[key]) for key, _ in EXPORT_COLUMNS)
             + " |")
     md_path.write_text("\n".join(md_lines) + "\n", encoding="utf-8")
-    return json_path, csv_path, md_path
+    xlsx_path = write_result_xlsx(job_dir, public_rows)
+    return json_path, csv_path, md_path, xlsx_path
 
 
 def sniff_ext(path):
@@ -1252,6 +1337,14 @@ def web_analyze(data):
             else:
                 item[key] = value
         rows.append(item)
+    xlsx_url = ""
+    xlsx_path = job.get("result_xlsx")
+    if xlsx_path:
+        try:
+            relative = Path(xlsx_path).resolve().relative_to(ROOT).as_posix()
+            xlsx_url = "/" + quote(relative)
+        except (OSError, ValueError):
+            pass
     return {
         "ok": True,
         "job_id": job["job_id"],
@@ -1261,6 +1354,7 @@ def web_analyze(data):
             "title": source["title"],
         },
         "rows": rows,
+        "xlsx_url": xlsx_url,
         "notice": job.get("vision_error") or "",
     }
 
@@ -1363,7 +1457,8 @@ def archive_job(data):
                 raise RuntimeError("图片识别没有生成明细")
         except RuntimeError as exc:
             vision_error = str(exc)
-    json_path, csv_path, md_path = write_result_bundle(job_dir, payload, rows)
+    json_path, csv_path, md_path, xlsx_path = write_result_bundle(
+        job_dir, payload, rows)
 
     if mode == "ai":
         queue_to_codex(cfg, source_path, job_dir, payload)
@@ -1389,6 +1484,7 @@ def archive_job(data):
         "result_json": str(json_path),
         "result_csv": str(csv_path),
         "result_md": str(md_path),
+        "result_xlsx": str(xlsx_path or ""),
         "images": len(image_paths),
         "message": message,
         "vision_used": vision_used,
@@ -1579,11 +1675,13 @@ def self_test():
         normalize_series_from_spec(mixed_series, [{"11.jpg"}, {"11.jpg"}])
         assert mixed_series[0]["series"] == "序曲"
         assert mixed_series[1]["series"] == "序曲"
-        json_path, csv_path, md_path = write_result_bundle(
+        json_path, csv_path, md_path, xlsx_path = write_result_bundle(
             Path(tmp), payload, rows)
         assert json.loads(json_path.read_text(encoding="utf-8"))["rows"]
         assert "39元/个" in csv_path.read_text(encoding="utf-8-sig")
         assert "测试系列" in md_path.read_text(encoding="utf-8")
+        if xlsx_path:
+            assert xlsx_path.exists()
         try:
             from PIL import Image, ImageDraw
         except ImportError:
@@ -1622,6 +1720,13 @@ def self_test():
                 assert 80 <= cropped.height <= 84
                 red, green, blue = cropped.getpixel((0, 0))
                 assert red > 150 and red > green * 4 and red > blue * 4
+            xlsx_test = write_result_xlsx(
+                Path(tmp),
+                [{"items": "测试商品", "images": [str(direct_path)]}],
+            )
+            if xlsx_test:
+                from openpyxl import load_workbook
+                assert len(load_workbook(xlsx_test).active._images) == 1
 
             image = Image.new("RGB", (200, 400), "white")
             draw = ImageDraw.Draw(image)
