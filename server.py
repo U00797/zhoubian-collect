@@ -3,7 +3,9 @@
 """Local bridge: browser page -> result bundle -> optional Codex export."""
 
 import argparse
+import base64
 import csv
+import hashlib
 import json
 import mimetypes
 import os
@@ -12,8 +14,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import zipfile
 from datetime import datetime
-from html import unescape
+from html import escape, unescape
 from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from math import ceil, floor
@@ -310,6 +313,145 @@ def write_result_xlsx(job_dir, rows):
     return xlsx_path
 
 
+def write_result_html(job_dir, payload, rows):
+    title = str(payload.get("title") or "周边识别结果").splitlines()[0].strip()
+    headers = [label for _, label in WEB_COLUMNS]
+
+    def text_cell(value):
+        text = str(value or "\\")
+        return escape(text).replace("\n", "<br>")
+
+    def image_cell(paths):
+        images = []
+        for raw_path in paths or []:
+            path = Path(raw_path)
+            if not path.is_file():
+                continue
+            mime = mimetypes.guess_type(path.name)[0] or "image/jpeg"
+            data = base64.b64encode(path.read_bytes()).decode("ascii")
+            images.append(
+                f'<img src="data:{mime};base64,{data}" alt="周边图片">'
+            )
+        return "".join(images) or "\\"
+
+    table_rows = []
+    for row in rows:
+        cells = []
+        for key, _ in WEB_COLUMNS:
+            value = image_cell(row.get(key)) if key == "images" else text_cell(
+                row.get(key)
+            )
+            cells.append(f"<td>{value}</td>")
+        table_rows.append("<tr>" + "".join(cells) + "</tr>")
+
+    html_path = job_dir / "result.html"
+    html_path.write_text(
+        """<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title}</title>
+<style>
+body {{ font-family: "Microsoft YaHei", sans-serif; color: #333; margin: 24px; }}
+table {{ border-collapse: collapse; width: 100%; }}
+th, td {{ border: 1px solid #999; padding: 8px; text-align: center; vertical-align: middle; }}
+th {{ background: #faf4e3; }}
+img {{ display: block; max-width: 220px; max-height: 220px; margin: 0 auto 6px; }}
+a {{ color: #2b5f9e; }}
+</style>
+</head>
+<body>
+<h1>{title}</h1>
+<p><a href="{url}">{url}</a></p>
+<table>
+<thead><tr>{headers}</tr></thead>
+<tbody>{rows}</tbody>
+</table>
+</body>
+</html>
+""".format(
+            title=escape(title),
+            url=escape(str(payload.get("url") or "")),
+            headers="".join(f"<th>{escape(label)}</th>" for label in headers),
+            rows="".join(table_rows),
+        ),
+        encoding="utf-8",
+    )
+    return html_path
+
+
+def write_result_enex(job_dir, payload, rows):
+    export_date = datetime.now().strftime("%Y%m%dT%H%M%SZ")
+    notes = []
+    for row in rows:
+        resources = []
+        used_hashes = set()
+        table_rows = []
+        for key, label in WEB_COLUMNS:
+            if key == "images":
+                media = []
+                for raw_path in row.get("images") or []:
+                    path = Path(raw_path)
+                    if not path.is_file():
+                        continue
+                    raw = path.read_bytes()
+                    digest = hashlib.md5(raw).hexdigest()
+                    mime = mimetypes.guess_type(path.name)[0] or "image/jpeg"
+                    if digest not in used_hashes:
+                        used_hashes.add(digest)
+                        encoded = base64.b64encode(raw).decode("ascii")
+                        resources.append(
+                            "<resource>"
+                            f"<data encoding=\"base64\">{encoded}</data>"
+                            f"<mime>{escape(mime)}</mime>"
+                            "<resource-attributes>"
+                            f"<file-name>{escape(path.name)}</file-name>"
+                            "</resource-attributes>"
+                            "</resource>"
+                        )
+                    media.append(
+                        f'<en-media type="{escape(mime)}" hash="{digest}"/>'
+                    )
+                value = "<br/>".join(media) if media else "\\"
+            else:
+                value = escape(str(row.get(key) or "\\")).replace("\n", "<br/>")
+            table_rows.append(
+                f"<tr><td><b>{escape(label)}</b></td><td>{value}</td></tr>"
+            )
+
+        item_title = str(row.get("items") or "周边明细").strip()
+        note_title = item_title[:120] or "周边明细"
+        content = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<!DOCTYPE en-note SYSTEM '
+            '"http://xml.evernote.com/pub/enml2.dtd">'
+            '<en-note><table border="1" cellpadding="6" cellspacing="0">'
+            + "".join(table_rows)
+            + "</table></en-note>"
+        ).replace("]]>", "]]&gt;")
+        notes.append(
+            "<note>"
+            f"<title>{escape(note_title)}</title>"
+            f"<content><![CDATA[{content}]]></content>"
+            + "".join(resources)
+            + "</note>"
+        )
+
+    enex_path = job_dir / "result.enex"
+    enex_path.write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<!DOCTYPE en-export SYSTEM '
+        '"http://xml.evernote.com/pub/evernote-export3.dtd">'
+        f'<en-export export-date="{export_date}" '
+        'application="Zhoubian Collect" version="1.0">'
+        + "".join(notes)
+        + "</en-export>",
+        encoding="utf-8",
+    )
+    return enex_path
+
+
 def write_result_bundle(job_dir, payload, rows):
     public_rows = []
     for row in rows:
@@ -364,7 +506,25 @@ def write_result_bundle(job_dir, payload, rows):
         md_lines.append("| " + " | ".join(cells) + " |")
     md_path.write_text("\n".join(md_lines) + "\n", encoding="utf-8")
     xlsx_path = write_result_xlsx(job_dir, public_rows)
-    return json_path, csv_path, md_path, xlsx_path
+    html_path = write_result_html(job_dir, payload, public_rows)
+    enex_path = write_result_enex(job_dir, payload, public_rows)
+    zip_path = job_dir / "result-bundle.zip"
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
+        for path in (
+            json_path, csv_path, md_path, xlsx_path, html_path, enex_path
+        ):
+            if path:
+                archive.write(path, path.name)
+        for image_path in sorted((job_dir / "images" / "crops").glob("*")):
+            if image_path.is_file():
+                archive.write(
+                    image_path,
+                    image_path.relative_to(job_dir).as_posix(),
+                )
+    return (
+        json_path, csv_path, md_path, xlsx_path, html_path, enex_path,
+        zip_path,
+    )
 
 
 def sniff_ext(path):
@@ -1371,6 +1531,9 @@ def web_analyze(data):
             "title": source["title"],
         },
         "rows": rows,
+        "html_url": output_url(job.get("result_html")),
+        "enex_url": output_url(job.get("result_enex")),
+        "zip_url": output_url(job.get("result_zip")),
         "md_url": output_url(job.get("result_md")),
         "xlsx_url": output_url(job.get("result_xlsx")),
         "notice": job.get("vision_error") or "",
@@ -1475,8 +1638,10 @@ def archive_job(data):
                 raise RuntimeError("图片识别没有生成明细")
         except RuntimeError as exc:
             vision_error = str(exc)
-    json_path, csv_path, md_path, xlsx_path = write_result_bundle(
-        job_dir, payload, rows)
+    (
+        json_path, csv_path, md_path, xlsx_path, html_path, enex_path,
+        zip_path,
+    ) = write_result_bundle(job_dir, payload, rows)
 
     if mode == "ai":
         queue_to_codex(cfg, source_path, job_dir, payload)
@@ -1503,6 +1668,9 @@ def archive_job(data):
         "result_csv": str(csv_path),
         "result_md": str(md_path),
         "result_xlsx": str(xlsx_path or ""),
+        "result_html": str(html_path),
+        "result_enex": str(enex_path),
+        "result_zip": str(zip_path),
         "images": len(image_paths),
         "message": message,
         "vision_used": vision_used,
@@ -1693,13 +1861,19 @@ def self_test():
         normalize_series_from_spec(mixed_series, [{"11.jpg"}, {"11.jpg"}])
         assert mixed_series[0]["series"] == "序曲"
         assert mixed_series[1]["series"] == "序曲"
-        json_path, csv_path, md_path, xlsx_path = write_result_bundle(
-            Path(tmp), payload, rows)
+        (
+            json_path, csv_path, md_path, xlsx_path, html_path, enex_path,
+            zip_path,
+        ) = write_result_bundle(Path(tmp), payload, rows)
         assert json.loads(json_path.read_text(encoding="utf-8"))["rows"]
         assert "39元/个" in csv_path.read_text(encoding="utf-8-sig")
         md_text = md_path.read_text(encoding="utf-8")
         assert "测试系列" in md_text
         assert "![周边图片](" in md_text
+        assert "<table>" in html_path.read_text(encoding="utf-8")
+        assert "<en-export" in enex_path.read_text(encoding="utf-8")
+        with zipfile.ZipFile(zip_path) as archive:
+            assert "result.md" in archive.namelist()
         if xlsx_path:
             assert xlsx_path.exists()
         try:

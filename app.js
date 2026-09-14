@@ -4,6 +4,9 @@ const generateButton = document.querySelector("#generateButton");
 const exportButton = document.querySelector("#exportButton");
 const excelButton = document.querySelector("#excelButton");
 const mdButton = document.querySelector("#mdButton");
+const htmlButton = document.querySelector("#htmlButton");
+const zipButton = document.querySelector("#zipButton");
+const enexButton = document.querySelector("#enexButton");
 const status = document.querySelector("#status");
 const tableWrap = document.querySelector("#tableWrap");
 const resultsBody = document.querySelector("#resultsBody");
@@ -27,6 +30,9 @@ const mergeableColumns = new Set([
 let rows = [];
 let xlsxUrl = "";
 let mdUrl = "";
+let htmlUrl = "";
+let zipUrl = "";
+let enexUrl = "";
 
 function setStatus(message, type = "") {
   status.textContent = message;
@@ -142,6 +148,9 @@ function renderRows() {
   exportButton.disabled = rows.length === 0;
   excelButton.disabled = rows.length === 0 || !xlsxUrl;
   mdButton.disabled = rows.length === 0 || !mdUrl;
+  htmlButton.disabled = rows.length === 0 || !htmlUrl;
+  zipButton.disabled = rows.length === 0 || !zipUrl;
+  enexButton.disabled = rows.length === 0 || !enexUrl;
 }
 
 function verifyTableRender() {
@@ -224,6 +233,33 @@ function exportMarkdown() {
   link.click();
 }
 
+function exportHtml() {
+  if (!htmlUrl) return;
+  const link = document.createElement("a");
+  const stamp = new Date().toISOString().replace(/\D/g, "").slice(0, 12);
+  link.href = htmlUrl;
+  link.download = `周边明细_${stamp}.html`;
+  link.click();
+}
+
+function exportZip() {
+  if (!zipUrl) return;
+  const link = document.createElement("a");
+  const stamp = new Date().toISOString().replace(/\D/g, "").slice(0, 12);
+  link.href = zipUrl;
+  link.download = `周边明细_${stamp}.zip`;
+  link.click();
+}
+
+function exportEnex() {
+  if (!enexUrl) return;
+  const link = document.createElement("a");
+  const stamp = new Date().toISOString().replace(/\D/g, "").slice(0, 12);
+  link.href = enexUrl;
+  link.download = `周边明细_${stamp}.enex`;
+  link.click();
+}
+
 async function generate() {
   const url = sourceUrl.value.trim();
   if (!url) {
@@ -236,10 +272,16 @@ async function generate() {
   exportButton.disabled = true;
   excelButton.disabled = true;
   mdButton.disabled = true;
+  htmlButton.disabled = true;
+  zipButton.disabled = true;
+  enexButton.disabled = true;
   tableWrap.hidden = true;
   rows = [];
   xlsxUrl = "";
   mdUrl = "";
+  htmlUrl = "";
+  zipUrl = "";
+  enexUrl = "";
   setStatus("正在获取链接并生成明细…", "loading");
 
   try {
@@ -255,6 +297,9 @@ async function generate() {
     rows = result.rows || [];
     xlsxUrl = result.xlsx_url || "";
     mdUrl = result.md_url || "";
+    htmlUrl = result.html_url || "";
+    zipUrl = result.zip_url || "";
+    enexUrl = result.enex_url || "";
     renderRows();
     const verification = verifyTableRender();
     document.documentElement.dataset.tableVerified = String(verification.ok);
@@ -279,6 +324,9 @@ async function generate() {
     exportButton.disabled = rows.length === 0;
     excelButton.disabled = rows.length === 0 || !xlsxUrl;
     mdButton.disabled = rows.length === 0 || !mdUrl;
+    htmlButton.disabled = rows.length === 0 || !htmlUrl;
+    zipButton.disabled = rows.length === 0 || !zipUrl;
+    enexButton.disabled = rows.length === 0 || !enexUrl;
   }
 }
 
@@ -300,6 +348,9 @@ generateButton.addEventListener("click", generate);
 exportButton.addEventListener("click", exportCsv);
 excelButton.addEventListener("click", exportExcel);
 mdButton.addEventListener("click", exportMarkdown);
+htmlButton.addEventListener("click", exportHtml);
+zipButton.addEventListener("click", exportZip);
+enexButton.addEventListener("click", exportEnex);
 sourceUrl.addEventListener("keydown", (event) => {
   if (event.key === "Enter") generate();
 });
