@@ -1438,14 +1438,9 @@ def vision_rows(cfg, payload, image_paths):
         if not keyword_matched and not focus_regions:
             continue
         regions = (
-            focus_regions if keyword_values and focus_regions
-            else image_regions
+            focus_regions if keyword_values else image_regions
         )
         merged_regions = merge_regions_by_source(regions, vision_parts)
-        if not merged_regions and keyword_values and focus_regions:
-            merged_regions = merge_regions_by_source(
-                image_regions, vision_parts
-            )
         sources = set()
         for region_number, (source_path, original_box) in enumerate(
             merged_regions, 1
