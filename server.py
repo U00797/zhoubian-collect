@@ -1309,7 +1309,8 @@ def vision_rows(cfg, payload, image_paths):
     job_dir = Path(payload["job_dir"])
     response_path = job_dir / "vision-response.txt"
     response_path.unlink(missing_ok=True)
-    keywords = "、".join(payload.get("keywords") or []) or "无"
+    keyword_values = keyword_list(payload.get("keywords"))
+    keywords = "、".join(keyword_values) or "无"
     vision_parts = prepare_vision_images(image_paths, job_dir)
     if not vision_parts:
         raise RuntimeError("没有可用于图片识别的商品图")
@@ -1331,12 +1332,13 @@ def vision_rows(cfg, payload, image_paths):
 7. spec 必须优先读取商品图下方和旁边的小字。只要尺寸、材质、工艺中任意一项存在，就必须把已读取到的项全部写入；只对确实缺失的子项写“\\”，严禁因为没有同时找到三项而整项留空。多个制品用“；”分隔，格式如“【徽章】尺寸约80x80mm 材质马口铁、PET 工艺细沙镭射底、烫哑金”。
 8. price 只记录售价、计价单位和销售数量或方式，例如“42CNY/组”“69CNY/只，2只/套，按套售卖”，不要把满赠、尺寸等信息写入 price。
 9. notes 汇总正文和图片中的所有 72H 特典及各级满赠，完整记录赠送对象、所属系列、数量、尺寸、门槛和限制；72H 是活动时限，绝不能误写成“满72CNY”等价格。同一批商品的共同备注必须完全相同，不要把单个商品的售价或销售数量写入 notes。
-10. image_regions 是该行商品图在当前附图中的紧边界数组。image_index 是从 1 开始的附图编号；box 使用 [左, 上, 右, 下] 归一化坐标，范围 0-1000。
-11. 只框商品照片、套组图或商品效果图，严格排除编号、标题、规格、价格、分隔线、背景、无关文字和相邻商品；不要按固定高度切块，也不要返回整行或整张图片。默认每行只用多个商品图的合并紧边界；只有商品图相隔很远或属于明显不同套组时才返回多个框。
-12. 所有无法确认的字段使用“\\”，不要编造。
+10. image_regions 是该行整组商品图在当前附图中的紧边界数组。image_index 是从 1 开始的附图编号；box 使用 [左, 上, 右, 下] 归一化坐标，范围 0-1000。
+11. 当筛选关键词不是“无”时，只输出与关键词直接匹配的商品或角色，不能把同图中的其他角色也作为结果。focus_regions 只框关键词对应角色本人的紧边界，不能框整排卡片、九宫格、全部角色、商品标题、说明文字、包装、糖果粒、袋口、装饰图案或背景；如果商品图包含多个角色或同一包装内还有小糖果图案，必须只定位到完整角色人物本身。无法确认单个角色时可以留空 focus_regions，但不能把整组框写进去。
+12. 只框商品照片、套组图或商品效果图，严格排除编号、标题、规格、价格、分隔线、背景、无关文字和相邻商品；不要按固定高度切块，也不要返回整行或整张图片。默认每行只用多个商品图的合并紧边界；只有商品图相隔很远或属于明显不同套组时才返回多个框。
+13. 所有无法确认的字段使用“\\”，不要编造。
 
 只输出以下结构的 JSON，不要 Markdown，不要解释：
-{{"rows":[{{"publisher":"","release_date":"","series":"","ip":"","items":"","spec":"","price":"","image_regions":[{{"image_index":1,"box":[420,575,920,685]}}],"notes":""}}]}}
+{{"rows":[{{"publisher":"","release_date":"","series":"","ip":"","items":"","spec":"","price":"","image_regions":[{{"image_index":1,"box":[420,575,920,685]}}],"focus_regions":[{{"image_index":1,"box":[520,600,760,900]}}],"notes":""}}]}}
 """
     cmd = [
         cli, "exec", "--ephemeral", "--skip-git-repo-check",
@@ -1384,6 +1386,7 @@ def vision_rows(cfg, payload, image_paths):
         "尺寸丨材质丨工艺": "spec",
         "价格": "price",
         "图片": "image_regions",
+        "焦点图片": "focus_regions",
         "备注": "notes",
     }
     rows = []
@@ -1402,12 +1405,50 @@ def vision_rows(cfg, payload, image_paths):
         }
         move_unit_sale_to_price(row)
         row["images"] = []
-        regions = item.get("image_regions")
-        if not isinstance(regions, list):
-            regions = []
+        image_regions = item.get("image_regions")
+        if not isinstance(image_regions, list):
+            image_regions = []
+        focus_regions = item.get("focus_regions")
+        if not isinstance(focus_regions, list):
+            focus_regions = []
+        if (
+            keyword_values
+            and focus_regions
+            and row["items"]
+            and not any(
+                keyword.lower() in row["items"].lower()
+                for keyword in keyword_values
+            )
+        ):
+            row["items"] = f"{keyword_values[0]}款 {row['items']}"
+        text_fields = " ".join(
+            str(item.get(key) or "")
+            for key in (
+                "publisher", "release_date", "series", "ip", "items",
+                "spec", "notes",
+            )
+        )
+        keyword_matched = (
+            not keyword_values
+            or any(
+                keyword.lower() in text_fields.lower()
+                for keyword in keyword_values
+            )
+        )
+        if not keyword_matched and not focus_regions:
+            continue
+        regions = (
+            focus_regions if keyword_values and focus_regions
+            else image_regions
+        )
+        merged_regions = merge_regions_by_source(regions, vision_parts)
+        if not merged_regions and keyword_values and focus_regions:
+            merged_regions = merge_regions_by_source(
+                image_regions, vision_parts
+            )
         sources = set()
         for region_number, (source_path, original_box) in enumerate(
-            merge_regions_by_source(regions, vision_parts), 1
+            merged_regions, 1
         ):
             sources.add(str(source_path))
             crop_path = crops_dir / (
